@@ -1,0 +1,21 @@
+# T3 full-stack integration: the real SerpentX container (splitter + two stock
+# ckproxy) between fake miners and two fake Stratum upstreams. Driven by
+# test/integration/run_t3.sh. GPLv3.
+name: serpentx-t3
+
+services:
+  poolA:
+    image: serpentx-dev
+    volumes: ["./test/integration:/t:ro"]
+    command: ["python3", "/t/fake_upstream.py", "--port", "4001", "--tag", "A", "--log", "/dev/null"]
+
+  poolB:
+    image: serpentx-dev
+    volumes: ["./test/integration:/t:ro"]
+    command: ["python3", "/t/fake_upstream.py", "--port", "4002", "--tag", "B", "--log", "/dev/null"]
+
+  serpentx:
+    image: serpentx
+    depends_on: [poolA, poolB]
+    volumes: ["./test/integration/t3cfg:/config:ro"]
+    ports: ["3333:3333", "8080:8080"]

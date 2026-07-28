@@ -1,0 +1,9 @@
+{
+  "downstream": { "stratum_port": 3333, "web_port": 8080 },
+  "mode": "farm_split",
+  "ratio_a": 70,
+  "pools": [
+    { "url": "poolA:4001", "user": "walletA.w1", "pass": "x", "ckproxy_mode": "proxy" },
+    { "url": "poolB:4002", "user": "walletB.w1", "pass": "x", "ckproxy_mode": "proxy" }
+  ]
+}

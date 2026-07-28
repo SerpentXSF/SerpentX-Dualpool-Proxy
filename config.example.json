@@ -1,0 +1,34 @@
+{
+  "_comment": "Dual-Pool Stratum Proxy config. Copy to config.json and edit. ratio_a is Pool A's share (0-100). See README.md and the design spec for details.",
+
+  "downstream": {
+    "stratum_port": 3333,
+    "web_port": 8080
+  },
+
+  "mode": "farm_split",
+  "ratio_a": 70,
+  "interval_ms": 180000,
+
+  "web_password": "",
+
+  "pools": [
+    {
+      "url": "poolA.example.com:3333",
+      "user": "bc1qYourWalletAddressA.worker1",
+      "pass": "x",
+      "ckproxy_mode": "userproxy",
+      "failover": {
+        "url": "backupA.example.com:3333",
+        "user": "bc1qYourWalletAddressA.worker1",
+        "pass": "x"
+      }
+    },
+    {
+      "url": "poolB.example.com:3333",
+      "user": "bc1qYourWalletAddressB.worker1",
+      "pass": "x",
+      "ckproxy_mode": "userproxy"
+    }
+  ]
+}

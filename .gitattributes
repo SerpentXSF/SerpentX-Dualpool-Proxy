@@ -1,0 +1,14 @@
+# Enforce LF for everything that runs in the Linux/Docker target — CRLF breaks
+# shell scripts (bad interpreter) and is unwanted in C sources and Makefiles.
+* text=auto eol=lf
+*.c   text eol=lf
+*.h   text eol=lf
+*.sh  text eol=lf
+*.py  text eol=lf
+Makefile     text eol=lf
+Dockerfile   text eol=lf
+*.json       text eol=lf
+*.md         text eol=lf
+*.html       text eol=lf
+*.png binary
+*.jpg binary

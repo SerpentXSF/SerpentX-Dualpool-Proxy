@@ -1,0 +1,7 @@
+# Dev/test image: build-essential + jansson + python for host tests of the
+# jansson-dependent modules (config, ckproxy_config) and T3 harness.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential libjansson-dev pkg-config python3 gdb valgrind curl \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /build

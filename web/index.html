@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SerpentX — Dual-Pool Stratum Proxy</title>
+<link rel="icon" type="image/png" href="serpentx-favicon.png">
+<link rel="apple-touch-icon" href="serpentx-favicon.png">
+<style>
+  :root{
+    --amber:#FDB515; --amber-2:#F5A623; --amber-deep:#C8821A;
+    --brown:#7A4A16; --brown-2:#8B5A1F; --ink:#141414;
+    --bg:#1b1d21; --bg-2:#232529; --bg-3:#2b2e34; --line:#34383f;
+    --txt:#e9ebef; --muted:#9aa0aa; --good:#4cc36b;
+    --bad:#e5533d; --warn:#e5a13d;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font:15px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  a{color:var(--amber)}
+  .wrap{max-width:1100px;margin:0 auto;padding:0 20px 60px}
+
+  /* ---------- header / branding ---------- */
+  header{position:relative;overflow:hidden;border-bottom:2px solid var(--amber-deep);
+    background:linear-gradient(180deg,#212429 0%,#17181c 100%)}
+  .hero{max-width:1100px;margin:0 auto;padding:22px 20px;display:flex;align-items:center;
+    gap:18px;position:relative;z-index:2}
+  .mech{position:absolute;right:-10px;top:-30px;height:220px;opacity:.10;z-index:1;
+    filter:grayscale(.2);pointer-events:none}
+  /* CSS wordmark — a fallback if serpentx-logo.png isn't dropped in web/ */
+  .logo-img{height:52px;display:none}
+  .emblem{height:76px;width:auto;display:none;filter:drop-shadow(0 2px 5px #0009)}
+  /* Two-tone wordmark matching the SerpentX logo: amber top half, brown bottom
+     half, heavy black outline, forward skew. Rebuilt in CSS so it's on-brand
+     even without the PNG. Drop serpentx-logo.png in web/ to override. */
+  .wordmark{font:900 44px/0.9 "Arial Black",Impact,system-ui,sans-serif;
+    letter-spacing:1px;transform:skewX(-9deg);display:inline-block;
+    -webkit-text-stroke:3px var(--ink);paint-order:stroke fill;
+    background:linear-gradient(180deg,#FFDA5C 0%,#FDB515 40%,#F5A623 53%,
+      #8B5A1F 53%,#6b4013 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    filter:drop-shadow(0 2px 0 #0006)}
+  .tag{color:var(--muted);font-size:13px;margin-top:4px;letter-spacing:.14em;
+    text-transform:uppercase}
+  .brandcol{display:flex;flex-direction:column}
+  .status-pill{margin-left:auto;z-index:2;display:flex;align-items:center;gap:8px;
+    background:var(--bg-3);border:1px solid var(--line);border-radius:999px;
+    padding:6px 14px;font-size:13px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--good);
+    box-shadow:0 0 8px var(--good)}
+  .dot.down{background:var(--bad);box-shadow:0 0 8px var(--bad)}
+
+  /* ---------- layout ---------- */
+  h2{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+    margin:30px 0 12px;font-weight:700}
+  .grid{display:grid;gap:16px}
+  .cols-2{grid-template-columns:1fr 1fr}
+  @media(max-width:720px){.cols-2{grid-template-columns:1fr}.mech{display:none}}
+  .card{background:var(--bg-2);border:1px solid var(--line);border-radius:var(--radius);
+    padding:18px}
+  .card.pool{border-top:3px solid var(--amber)}
+  .card.pool.b{border-top-color:var(--brown-2)}
+  .card.pool.down{opacity:.72;border-top-color:var(--bad)}
+
+  .poolhead{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .poolhead .name{font-weight:800;font-size:17px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);
+    color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .badge.on{color:var(--good);border-color:#2e6b3d}
+  .badge.fail{color:var(--warn);border-color:#6b552e}
+  .badge.off{color:var(--bad);border-color:#6b332e}
+  .url{color:var(--muted);font-size:12.5px;word-break:break-all;margin-bottom:14px}
+
+  .stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+  .stat{background:var(--bg-3);border-radius:8px;padding:10px 12px}
+  .stat .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .stat .v{font-size:20px;font-weight:800;margin-top:2px;
+    font-variant-numeric:tabular-nums}
+  .v.ok{color:var(--good)} .v.no{color:var(--bad)}
+
+  /* ratio bar */
+  .ratio-wrap{margin-top:6px}
+  .ratio-line{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);
+    margin-bottom:6px}
+  .bar{height:22px;border-radius:6px;overflow:hidden;display:flex;border:1px solid var(--line)}
+  .bar .a{background:linear-gradient(180deg,var(--amber),var(--amber-deep))}
+  .bar .b{background:linear-gradient(180deg,var(--brown-2),var(--brown))}
+  .bar span{display:flex;align-items:center;justify-content:center;font-size:12px;
+    font-weight:800;color:var(--ink)}
+  .target-mark{position:relative;height:0}
+  .tick{position:absolute;top:-24px;width:2px;height:22px;background:#fff9;}
+  .tick::after{content:"target";position:absolute;top:-15px;left:-16px;font-size:10px;
+    color:var(--muted)}
+
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+  td .tag-pool{font-weight:800}
+  .tag-pool.A{color:var(--amber)} .tag-pool.B{color:var(--brown-2)}
+  .mono{font-variant-numeric:tabular-nums}
+
+  /* settings form */
+  form .row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:720px){form .row{grid-template-columns:1fr}}
+  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 5px;
+    text-transform:uppercase;letter-spacing:.06em}
+  input[type=text],input[type=password],select{width:100%;background:var(--bg-3);
+    border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:9px 11px;
+    font:inherit}
+  input:focus,select:focus{outline:none;border-color:var(--amber)}
+  .slider-row{display:flex;align-items:center;gap:16px;margin-top:6px}
+  input[type=range]{flex:1;accent-color:var(--amber)}
+  .ratio-badge{font-weight:800;font-size:20px;min-width:120px;text-align:right;
+    font-variant-numeric:tabular-nums}
+  .ratio-badge b{color:var(--amber)} .ratio-badge i{color:var(--brown-2);font-style:normal}
+  .actions{margin-top:20px;display:flex;gap:12px;align-items:center}
+  button{background:linear-gradient(180deg,var(--amber),var(--amber-deep));color:var(--ink);
+    border:2px solid var(--ink);font-weight:800;padding:11px 22px;border-radius:8px;
+    cursor:pointer;letter-spacing:.03em;transform:skewX(-6deg)}
+  button span{display:inline-block;transform:skewX(6deg)}
+  button.ghost{background:transparent;color:var(--muted);border-color:var(--line)}
+  .savenote{color:var(--muted);font-size:13px}
+  footer{color:var(--muted);font-size:12px;margin-top:40px;border-top:1px solid var(--line);
+    padding-top:16px}
+  .demo{background:#3a2f14;border:1px solid #6b552e;color:#e5c98d;font-size:12.5px;
+    padding:8px 12px;border-radius:8px;margin-top:14px;display:none}
+</style>
+</head>
+<body>
+<header>
+  <img class="mech" src="serpentx-mech.png" alt="" onerror="this.style.display='none'">
+  <div class="hero">
+    <!-- Header logo: the crest emblem (contains the SERPENTX word). Falls back
+         to the CSS wordmark if serpentx-emblem.png is absent. -->
+    <img class="emblem" id="emblem" src="serpentx-emblem.png" alt="SerpentX"
+         onload="this.style.display='block';document.getElementById('wm').style.display='none'">
+    <div class="wordmark" id="wm">SERPENTX</div>
+    <div class="brandcol" style="margin-left:4px">
+      <div class="tag">Dual-Pool Stratum Proxy</div>
+    </div>
+    <div class="status-pill"><span class="dot" id="svcDot"></span>
+      <span id="svcTxt">Proxy online</span></div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="demo" id="demoNote">⚠ Showing demo data — the live <code>/api/status</code>
+    endpoint isn't reachable from this preview.</div>
+
+  <!-- ===== live split ===== -->
+  <h2>Pool split — actual (connected miners) vs target</h2>
+  <div class="card">
+    <div class="ratio-wrap">
+      <div class="ratio-line"><span id="splitLabelA">Pool A</span>
+        <span id="splitLabelB">Pool B</span></div>
+      <div class="target-mark"><div class="tick" id="targetTick"></div></div>
+      <div class="bar">
+        <span class="a" id="barA" style="width:70%">70%</span>
+        <span class="b" id="barB" style="width:30%">30%</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== pools ===== -->
+  <h2>Pools</h2>
+  <div class="grid cols-2" id="pools"></div>
+
+  <!-- ===== miners ===== -->
+  <h2>Connected miners</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Worker</th><th>Pool</th><th>Hashrate</th><th>Accepted</th>
+        <th>Rejected</th><th>Since</th></tr></thead>
+      <tbody id="miners"></tbody>
+    </table>
+  </div>
+
+  <!-- ===== settings ===== -->
+  <h2>Settings</h2>
+  <div class="card">
+    <form id="cfgForm" onsubmit="return saveConfig(event)">
+      <div class="row">
+        <div>
+          <label>Pool A — URL (host:port)</label>
+          <input type="text" id="a_url" placeholder="poolA.example.com:3333">
+          <label>Pool A — User / wallet.worker</label>
+          <input type="text" id="a_user" placeholder="bc1q…A.worker1">
+          <label>Pool A — Password</label>
+          <input type="password" id="a_pass" placeholder="leave blank to keep current">
+        </div>
+        <div>
+          <label>Pool B — URL (host:port)</label>
+          <input type="text" id="b_url" placeholder="poolB.example.com:3333">
+          <label>Pool B — User / wallet.worker</label>
+          <input type="text" id="b_user" placeholder="bc1q…B.worker1">
+          <label>Pool B — Password</label>
+          <input type="password" id="b_pass" placeholder="leave blank to keep current">
+        </div>
+      </div>
+
+      <label>Split ratio</label>
+      <div class="slider-row">
+        <input type="range" id="ratio" min="0" max="100" value="70"
+               oninput="onRatio(this.value)">
+        <div class="ratio-badge"><b id="rA">70% A</b> / <i id="rB">30% B</i></div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Mode</label>
+          <select id="mode" onchange="onMode()">
+            <option value="farm_split">farm_split — split miners across pools (fleets)</option>
+            <option value="time_slice">time_slice — split one miner over time (single)</option>
+          </select>
+        </div>
+        <div id="intervalWrap" style="display:none">
+          <label>Time-slice interval (ms)</label>
+          <input type="text" id="interval_ms" value="180000">
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="submit"><span>Save &amp; apply</span></button>
+        <button type="button" class="ghost" onclick="loadStatus()"><span>Reload</span></button>
+        <span class="savenote" id="saveNote">Ratio &amp; mode apply instantly (no miner drops). Pool/credential changes are saved and take effect after a container restart.</span>
+      </div>
+    </form>
+  </div>
+
+  <footer>
+    SerpentX <span id="footVer">X.1</span> · GPLv3 · built on
+    <a href="https://github.com/ckolivas/ckpool">ckpool / ckproxy</a>.
+    Point miners at <code class="mono" id="footPort">stratum+tcp://this-host:3333</code>.
+  </footer>
+</div>
+
+<script>
+// ---- demo fallback data (used when /api/status is unreachable) ----
+const DEMO = {
+  version:"X.1",
+  service:{online:true, stratum_port:3333},
+  ratio_a:70, mode:"farm_split", interval_ms:180000,
+  actual:{a:66.7, b:33.3},
+  pools:[
+    {id:"A", name:"Pool A", state:"on", url:"solo.ckpool.org:3333",
+     user:"bc1qexampleA.serpentx", connected:2, accepted:1841, rejected:7},
+    {id:"B", name:"Pool B", state:"on", url:"pool.example.com:3333",
+     user:"bc1qexampleB.serpentx", connected:1, accepted:930, rejected:3}
+  ],
+  miners:[
+    {worker:"bitaxe-01", pool:"A", hashrate:"512 GH/s", accepted:1120, rejected:4, since:"2h 14m"},
+    {worker:"bitaxe-02", pool:"B", hashrate:"401 GH/s", accepted:930, rejected:3, since:"2h 09m"},
+    {worker:"nerdaxe-01", pool:"A", hashrate:"300 GH/s", accepted:721, rejected:3, since:"58m"}
+  ]
+};
+
+function esc(s){return String(s).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));}
+
+function render(d){
+  // service pill
+  const on = d.service && d.service.online;
+  document.getElementById('svcDot').className = 'dot' + (on?'':' down');
+  document.getElementById('svcTxt').textContent = on?'Proxy online':'Proxy offline';
+  document.getElementById('footPort').textContent =
+    'stratum+tcp://this-host:' + (d.service?.stratum_port ?? 3333);
+  if(d.version) document.getElementById('footVer').textContent = d.version;
+
+  // split bar (actual) + target tick
+  const a = Math.round((d.actual?.a ?? d.ratio_a)*10)/10, b = Math.round((100-a)*10)/10;
+  document.getElementById('barA').style.width=a+'%';
+  document.getElementById('barA').textContent=a+'%';
+  document.getElementById('barB').style.width=b+'%';
+  document.getElementById('barB').textContent=b+'%';
+  document.getElementById('splitLabelA').textContent='Pool A · '+a+'% actual';
+  document.getElementById('splitLabelB').textContent=d.ratio_a+'% A target · Pool B '+b+'% actual';
+  document.getElementById('targetTick').style.left=d.ratio_a+'%';
+
+  // pools
+  const badge = s => s==='on' ? '<span class="badge on">online</span>'
+    : s==='fail' ? '<span class="badge fail">failover</span>'
+    : '<span class="badge off">down</span>';
+  document.getElementById('pools').innerHTML = d.pools.map(p=>`
+    <div class="card pool ${p.id==='B'?'b':''} ${p.state==='off'?'down':''}">
+      <div class="poolhead"><span class="name">${esc(p.name)}</span>
+        <span class="tag-pool ${p.id}">${p.id}</span>${badge(p.state)}</div>
+      <div class="url">${esc(p.url)}<br>${esc(p.user)}</div>
+      <div class="stats">
+        <div class="stat"><div class="k">Miners</div><div class="v">${p.connected ?? 0}</div></div>
+        <div class="stat"><div class="k">Accepted</div><div class="v ok">${p.accepted}</div></div>
+        <div class="stat"><div class="k">Rejected</div><div class="v ${p.rejected?'no':''}">${p.rejected}</div></div>
+      </div>
+    </div>`).join('');
+
+  // miners
+  document.getElementById('miners').innerHTML = d.miners.map(m=>`
+    <tr><td>${esc(m.worker)}</td>
+      <td><span class="tag-pool ${m.pool}">${m.pool}</span></td>
+      <td class="mono">${esc(m.hashrate)}</td>
+      <td class="mono">${m.accepted}</td><td class="mono">${m.rejected}</td>
+      <td class="mono">${esc(m.since)}</td></tr>`).join('');
+
+  // settings form
+  const p = d.pools;
+  a_url.value=p[0].url; a_user.value=p[0].user;
+  b_url.value=p[1].url; b_user.value=p[1].user;
+  ratio.value=d.ratio_a; onRatio(d.ratio_a);
+  mode.value=d.mode; interval_ms.value=d.interval_ms; onMode();
+}
+
+function onRatio(v){v=+v;
+  document.getElementById('rA').textContent=v+'% A';
+  document.getElementById('rB').textContent=(100-v)+'% B';}
+function onMode(){document.getElementById('intervalWrap').style.display=
+  document.getElementById('mode').value==='time_slice'?'block':'none';}
+
+// Optional dashboard key (only needed if the proxy was started with web_password).
+function authHeaders(){
+  const k=localStorage.getItem('serpentx_key');
+  return k ? {'X-SerpentX-Key':k} : {};
+}
+async function loadStatus(){
+  try{
+    let r=await fetch('/api/status',{cache:'no-store',headers:authHeaders()});
+    if(r.status===401){
+      const k=prompt('Dashboard key:');
+      if(k){ localStorage.setItem('serpentx_key',k);
+        r=await fetch('/api/status',{cache:'no-store',headers:authHeaders()}); }
+    }
+    if(!r.ok) throw 0;
+    render(await r.json());
+    document.getElementById('demoNote').style.display='none';
+  }catch(e){
+    render(DEMO);
+    document.getElementById('demoNote').style.display='block';
+  }
+}
+async function saveConfig(ev){
+  ev.preventDefault();
+  const body={ ratio_a:+ratio.value, mode:mode.value, interval_ms:+interval_ms.value,
+    pools:[{url:a_url.value,user:a_user.value,pass:a_pass.value},
+           {url:b_url.value,user:b_user.value,pass:b_pass.value}]};
+  const note=document.getElementById('saveNote');
+  try{
+    const r=await fetch('/api/config',{method:'POST',
+      headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
+      body:JSON.stringify(body)});
+    if(r.ok){
+      note.textContent='Saved. Ratio & mode applied now; pool changes apply after a restart.';
+      a_pass.value=''; b_pass.value='';   // blank = keep current password
+      loadStatus();
+    }else{
+      note.textContent='Save failed ('+r.status+').';
+    }
+  }catch(e){ note.textContent='Preview mode — save is disabled (no backend).'; }
+  return false;
+}
+loadStatus();
+setInterval(loadStatus, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# secrets & user runtime config (never commit these)
+.env
+/config/*
+!/config/.gitkeep
+
+# generated ckproxy configs
+ckproxy*.json
+
+# build artifacts
+serpentx-splitter
+test/host/test_dual_pool
+test/host/test_alloc
+test/host/test_share
+test/host/test_config
+test/host/test_health
+*.o
+
+# test scratch
+test/integration/t3cfg/*.log

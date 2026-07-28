@@ -1,0 +1,17 @@
+# keep the Docker build context small & clean
+.git
+.gitignore
+.gitattributes
+.env
+config/*
+!config/.gitkeep
+docs
+grafana
+test/host/test_dual_pool
+test/host/test_alloc
+test/host/test_share
+test/host/test_config
+test/host/test_health
+serpentx-splitter
+*.o
+*.md
