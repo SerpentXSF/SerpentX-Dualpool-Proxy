@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <i>Version X.1 · License: GPLv3 · Built on <a href="https://github.com/ckolivas/ckpool">ckpool/ckproxy</a> · Linux/Docker</i>
+  <i>Version X.3 · License: GPLv3 · Built on <a href="https://github.com/ckolivas/ckpool">ckpool/ckproxy</a> · Linux/Docker</i>
 </p>
 
 ---
@@ -23,15 +23,17 @@ failover. No firmware changes, no warranty risk, one box for your whole fleet.
 miner you own — including closed-firmware machines that could never do this
 themselves — to decentralize away from big centralized pools.
 
-> ⚠️ **Status:** **X.1** — feature-complete core, tested end-to-end (unit +
-> integration + real-ckproxy full stack). See [CHANGELOG.md](CHANGELOG.md) for
-> releases, [PLAN.md](PLAN.md) for what's done, and
-> [docs/ROADMAP.md](docs/ROADMAP.md) for what's next.
+> **Status:** **X.3** — verified end-to-end with real hardware (BitAxe, NerdAxe,
+> NerdQAxe, HammerMiner) against live pools: forwarded shares are accepted upstream
+> and the proxy worker registers at the pool with full hashrate. See
+> [CHANGELOG.md](CHANGELOG.md) for releases and [docs/ROADMAP.md](docs/ROADMAP.md)
+> for what's next.
 
 ## Features
 
-- **Simultaneous ratio split** across two pools — **hashrate-weighted**, so mixed
-  fleets (an S19 + a few BitAxes) split by *work*, not miner count.
+- **Simultaneous ratio split** across two pools — each miner is pinned to one pool
+  to hit your target ratio (allocation is by miner count today; hashrate-weighting
+  for mixed fleets is on the roadmap).
 - **Farm-split** (churn-free, for 2+ miners) and **time-slice** (a single miner
   across both pools, works with any firmware).
 - **Per-pool failover** + pool-level **donation, eviction, and recovery** — a dead
@@ -42,7 +44,9 @@ themselves — to decentralize away from big centralized pools.
   per-miner list, and a settings form that **hot-applies** (no miner drops).
 - **Prometheus `/metrics`** + a bundled Grafana dashboard.
 - **Dockerized**, configured by `.env`, a `config.json`, or the dashboard.
-- Built on **unmodified ckpool** — battle-tested Stratum, vardiff, ASICBoost.
+- Built on **near-stock ckpool** — battle-tested Stratum, vardiff, ASICBoost. We
+  apply only a few minimal upstream bug-fix patches (see
+  [docker/patches/](docker/patches/README.md)); ckpool is otherwise unchanged.
 
 ## Quickstart
 
@@ -71,20 +75,22 @@ RATIO_A=70
 ## How it works
 
 ```
-  your miners ──► :3333  ┌── Dual-Pool Proxy splitter ──► ckproxy A ──► Pool A (+ failover)
-  (point here)           │  (routes each miner    └► ckproxy B ──► Pool B (+ failover)
-  you ────────► :8080    │   by hashrate ratio)
-                         └── live dashboard + /api + /metrics
+  your miners ──► :3333 ──┐
+  (point here)            │   ┌──► ckproxy A ──► Pool A (+ failover)
+                          ├──►│ splitter
+  you ─────────► :8080 ───┘   └──► ckproxy B ──► Pool B (+ failover)
+                              (assigns each miner to a pool to hit your ratio;
+                               serves the live dashboard + /api + /metrics)
 ```
 
-One container runs a small router (**splitter**) plus **two unmodified
+One container runs a small router (**splitter**) plus **two near-stock
 [ckproxy](https://github.com/ckolivas/ckpool) instances**, one per pool. Because a
 miner is relayed end-to-end to exactly one ckproxy for its session, ckproxy
 handles all the hard Stratum work and shares are **structurally** routed to the
 right pool. The splitter owns allocation, failover/donation, accounting, and the UI.
 
-- **Farm-split (default):** each miner assigned to one pool (weighted by its
-  hashrate), pinned for its session. Zero switching loss.
+- **Farm-split (default):** each miner assigned to one pool to hit your target
+  ratio, pinned for its session. Zero switching loss.
 - **Time-slice (single miner):** the proxy recycles the miner's connection each
   interval so it reconnects onto the next pool. Any miner; minute-scale churn.
 
@@ -110,10 +116,11 @@ honest playbook (with the math, and what's hype): **[docs/STRATEGIES.md](docs/ST
 ## Why not just HAProxy?
 
 Weighted TCP balancing across two ckproxy backends gets you *most* of farm-split
-for free — and it's a good sanity check. Dual-Pool Proxy exists for the four things a
-dumb TCP balancer can't do: **hashrate-weighted** allocation (not connection
-count), **per-pool share accounting**, **donation/recovery**, and **the
-dashboard**. If those don't matter to you, HAProxy is genuinely fine.
+for free — and it's a good sanity check. Dual-Pool Proxy exists for the things a
+dumb TCP balancer can't do: **correct-by-construction share routing**, **per-pool
+share accounting**, **pool donation/recovery** (a dead pool's hashrate moves to the
+survivor and drifts back), and **the dashboard**. If those don't matter to you,
+HAProxy is genuinely fine.
 
 ## Building / testing
 

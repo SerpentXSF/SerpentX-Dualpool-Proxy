@@ -1,5 +1,5 @@
 {
-  "_comment": "Dual-Pool Stratum Proxy config. Copy to config.json and edit. ratio_a is Pool A's share (0-100). See README.md and the design spec for details.",
+  "_comment": "Dual-Pool Stratum Proxy config. Copy to config.json and edit. ratio_a is Pool A's share (0-100). Each pool may add optional \"startdiff\" and \"mindiff\" numbers to force a difficulty floor for pools that require one (e.g. public-pool.io wants ~100000); omit them to use the pool's own difficulty (default 42/1). See docs/CONFIGURATION.md.",
 
   "downstream": {
     "stratum_port": 3333,

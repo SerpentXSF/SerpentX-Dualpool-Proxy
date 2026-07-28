@@ -70,6 +70,11 @@ static volatile sig_atomic_t g_reload = 0;       /* SIGHUP -> reload config */
 static volatile int     g_pool_crashloop[2];     /* 1 => force pool down */
 static int64_t          g_pool_last_exit_us[2];
 static int              g_pool_fail_streak[2];
+/* post-(re)spawn warmup: don't route clients to a ckproxy until it has upstream
+ * work — stock ckpool can SIGABRT if a client subscribes during its no-work
+ * window. During warmup, miners donate to the healthy pool. */
+static int64_t          g_pool_warmup_until_us[2];
+#define CKPROXY_WARMUP_US (5LL * 1000000)
 
 static int64_t mono_us(void)
 {
@@ -88,6 +93,9 @@ typedef struct {
     int       down_fd;
     char      worker[64];
     time_t    since;
+    uint64_t  accepted;       /* per-miner accepted shares */
+    uint64_t  rejected;       /* per-miner rejected shares */
+    double    accepted_diff;  /* difficulty-weighted (for hashrate estimate) */
 } conn_slot_t;
 static conn_slot_t g_conns[SX_MAX_CONNS];
 static pthread_mutex_t g_conns_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -103,6 +111,9 @@ static int conn_register(pool_id_t pool, int down_fd)
             g_conns[i].down_fd = down_fd;
             g_conns[i].worker[0] = '\0';
             g_conns[i].since = time(NULL);
+            g_conns[i].accepted = 0;
+            g_conns[i].rejected = 0;
+            g_conns[i].accepted_diff = 0.0;
             idx = i;
             break;
         }
@@ -265,9 +276,19 @@ static void sniff(void *ctx, int up, const char *line, size_t len)
             json_t *res = json_object_get(m, "result");
             if (json_is_integer(id) && res && !json_is_null(res)) {
                 pthread_mutex_lock(&g_totals_lock);
-                share_session_on_result(&c->sess, (long)json_integer_value(id),
-                                        json_is_true(res), &g_totals);
+                share_result_t rr = share_session_on_result(
+                    &c->sess, (long)json_integer_value(id), json_is_true(res), &g_totals);
                 pthread_mutex_unlock(&g_totals_lock);
+                if (rr.counted && c->slot >= 0) {   /* per-miner tally for the UI */
+                    pthread_mutex_lock(&g_conns_lock);
+                    if (rr.accepted) {
+                        g_conns[c->slot].accepted++;
+                        g_conns[c->slot].accepted_diff += rr.diff;
+                    } else {
+                        g_conns[c->slot].rejected++;
+                    }
+                    pthread_mutex_unlock(&g_conns_lock);
+                }
             }
         }
     }
@@ -294,6 +315,17 @@ static int open_upstream(pool_id_t *out_pool)
     pool_id_t p = g_time_slice ? g_current_pool   /* time-slice: current slice */
                                : alloc_pick(&g_alloc, 0);  /* farm-split */
     pthread_mutex_unlock(&g_alloc_lock);
+
+    /* If the chosen pool's ckproxy is warming up (just (re)spawned, no upstream
+     * work yet) and the other pool is ready, send this miner to the ready pool
+     * instead — avoids subscribing during the no-work window that can SIGABRT
+     * stock ckpool. */
+    if (!g_time_slice) {
+        int64_t now = mono_us();
+        pool_id_t other = (p == POOL_A) ? POOL_B : POOL_A;
+        if (now < g_pool_warmup_until_us[p] && now >= g_pool_warmup_until_us[other])
+            p = other;
+    }
 
     int up = tcp_connect(g_pool_host[p], g_pool_port[p]);
     if (up < 0) {
@@ -336,6 +368,13 @@ static void persist_config(void)
         json_object_set_new(p, "user", json_string(pc->primary.user));
         json_object_set_new(p, "pass", json_string(pc->primary.pass));
         json_object_set_new(p, "ckproxy_mode", json_string(pc->ckproxy_mode));
+        /* Preserve per-pool difficulty (0 = unset/default); without this a
+         * dashboard save would drop a hand-set startdiff and revert the pool to
+         * the default 42, breaking high-floor pools like public-pool.io. */
+        if (pc->startdiff > 0)
+            json_object_set_new(p, "startdiff", json_integer(pc->startdiff));
+        if (pc->mindiff > 0)
+            json_object_set_new(p, "mindiff", json_integer(pc->mindiff));
         if (pc->has_failover) {
             json_t *f = json_object();
             json_object_set_new(f, "url",  json_string(pc->failover.url));
@@ -381,6 +420,11 @@ static void *probe_thread(void *arg)
         if (g_reload) { g_reload = 0; reload_config(); }
 
         for (int i = 0; i < 2; i++) {
+            /* Don't poke a ckproxy while it's warming up (just (re)spawned, no
+             * upstream work yet) — that's exactly when stock ckpool can SIGABRT
+             * on an incoming client. Skip this round; it's already routed around. */
+            if (mono_us() < g_pool_warmup_until_us[i]) continue;
+
             int fd = tcp_connect(g_pool_host[i], g_pool_port[i]);
             bool reachable = (fd >= 0);
             if (reachable) close(fd);
@@ -419,7 +463,7 @@ static void *probe_thread(void *arg)
             else if (!was_up && now_up)
                 fprintf(stderr, "dualpool: pool %c recovered\n", 'A' + i);
         }
-        usleep(3 * 1000 * 1000);   /* 3s between probe rounds */
+        usleep(5 * 1000 * 1000);   /* 5s between probe rounds (gentler on ckproxy) */
     }
     return NULL;
 }
@@ -519,9 +563,18 @@ static char *build_status_json(void)
         char since[32];
         snprintf(since, sizeof(since), "%ldm %02lds", secs / 60, secs % 60);
         json_object_set_new(mm, "since", json_string(since));
-        json_object_set_new(mm, "hashrate", json_string("\xe2\x80\x94"));  /* em dash */
-        json_object_set_new(mm, "accepted", json_integer(0));
-        json_object_set_new(mm, "rejected", json_integer(0));
+        /* per-miner hashrate estimate from difficulty-weighted accepted shares:
+         * hashes ~= accepted_diff * 2^32, over the connection lifetime. */
+        char mhr[32] = "\xe2\x80\x94";  /* em dash until we have data */
+        if (secs > 0 && g_conns[i].accepted_diff > 0) {
+            double hps = g_conns[i].accepted_diff * 4294967296.0 / (double)secs;
+            if (hps >= 1e12)      snprintf(mhr, sizeof(mhr), "%.2f TH/s", hps / 1e12);
+            else if (hps >= 1e9)  snprintf(mhr, sizeof(mhr), "%.1f GH/s", hps / 1e9);
+            else                  snprintf(mhr, sizeof(mhr), "%.0f MH/s", hps / 1e6);
+        }
+        json_object_set_new(mm, "hashrate", json_string(mhr));
+        json_object_set_new(mm, "accepted", json_integer((json_int_t)g_conns[i].accepted));
+        json_object_set_new(mm, "rejected", json_integer((json_int_t)g_conns[i].rejected));
         json_array_append_new(miners, mm);
     }
     pthread_mutex_unlock(&g_conns_lock);
@@ -744,6 +797,8 @@ static ckproxy_proc_t g_ck[2];
 static void spawn_one(ckproxy_proc_t *p)
 {
     p->pid = ckproxy_spawn(p->ckbin, p->pool, p->cfg, p->sock, p->name);
+    int i = (int)(p - g_ck);
+    if (i >= 0 && i < 2) g_pool_warmup_until_us[i] = mono_us() + CKPROXY_WARMUP_US;
 }
 
 /* Monitor thread: reap and respawn a died ckproxy with exponential backoff. If a
@@ -759,6 +814,14 @@ static void *monitor_thread(void *arg)
         if (died < 0) { usleep(500 * 1000); continue; }
         for (int i = 0; i < 2; i++) {
             if (g_ck[i].pid != died) continue;
+
+            /* why did it die? — crash (signal) vs clean/error exit code */
+            if (WIFSIGNALED(status))
+                fprintf(stderr, "dualpool: ckproxy %s killed by signal %d\n",
+                        g_ck[i].name, WTERMSIG(status));
+            else if (WIFEXITED(status))
+                fprintf(stderr, "dualpool: ckproxy %s exited code %d\n",
+                        g_ck[i].name, WEXITSTATUS(status));
 
             int64_t now = mono_us();
             if (g_pool_last_exit_us[i] && now - g_pool_last_exit_us[i] < 15LL * 1000000)

@@ -39,19 +39,30 @@ This page documents every option and how to tune it.
 | `pools[].pass` | Password (usually `x`) | `x` |
 | `pools[].ckproxy_mode` | `userproxy` or `proxy` (see below) | `userproxy` |
 | `pools[].failover` | Optional `{url,user,pass}` backup for **that** pool | none |
+| `pools[].startdiff` | Optional starting difficulty for **that** pool | `42` |
+| `pools[].mindiff` | Optional minimum difficulty for **that** pool | `1` |
+
+**When to set `startdiff` / `mindiff`:** most pools dictate their own difficulty and
+you can leave these out. Set them only for a pool that enforces a difficulty *floor*
+(for example public-pool.io defaults to ~100000). Setting the floor to that value
+makes your miners submit shares the pool will accept from the first connection. A
+value of `0` (or omitting the field) means "use the pool's difficulty."
 
 ### Environment-variable equivalents (`.env`)
 
-`POOL_A_URL`, `POOL_A_USER`, `POOL_A_PASS`, `POOL_A_FAILOVER_URL`, `POOL_A_MODE`
-(and the `POOL_B_*` equivalents), plus `RATIO_A`, `MODE`, `INTERVAL_MS`,
-`STRATUM_PORT`, `WEB_PORT`, `WEB_PASSWORD`. See [`.env.example`](../.env.example).
+`POOL_A_URL`, `POOL_A_USER`, `POOL_A_PASS`, `POOL_A_FAILOVER_URL`, `POOL_A_MODE`,
+`POOL_A_STARTDIFF`, `POOL_A_MINDIFF` (and the `POOL_B_*` equivalents), plus
+`RATIO_A`, `MODE`, `INTERVAL_MS`, `STRATUM_PORT`, `WEB_PORT`, `WEB_PASSWORD`. See
+[`.env.example`](../.env.example).
 
 ---
 
 ## Choosing your split (`ratio_a`)
 
-`ratio_a` is the **long-run share of hashrate** sent to Pool A, weighted by each
-miner's real hashrate (not by miner count). Examples:
+`ratio_a` is the **long-run share of your fleet** sent to Pool A. In farm-split each
+miner is pinned to one pool to approach this ratio by miner count, so with
+similar-sized miners it tracks hashrate closely; with very mixed sizes it is coarser
+(hashrate-weighted allocation is on the roadmap). Examples:
 
 - `ratio_a: 70` → 70% to A, 30% to B.
 - `ratio_a: 100` → everything to A (B is a hot standby via failover/donation).
@@ -113,10 +124,10 @@ traffic when the pool recovers. Nothing to configure; it's always on.
 ## Dashboard, API & metrics
 
 - **Dashboard:** `http://<host>:8080` — live status + a settings form that edits
-  the **whole config** (pools, ratio, mode) and **writes it to `config.json`**.
-  Ratio/mode apply instantly (no miner disconnects); pool/credential changes are
-  saved and take effect after a restart. Leave a password field **blank to keep**
-  the current password.
+  the pools, ratio, and mode and **writes them to `config.json`**. A **ratio**
+  change applies instantly with no miner disconnects; **mode**, **interval**, and
+  **pool/credential** changes are saved and take effect after a restart. Leave a
+  password field **blank to keep** the current password.
 - **REST:** `GET /api/status` (JSON), `POST /api/config`
   (`{ratio_a, mode, interval_ms, pools:[{url,user,pass}]}` — any subset).
 - **Prometheus:** `GET /metrics` — import
@@ -143,8 +154,10 @@ dashboard edits). For day-to-day changes, use the dashboard or edit `config.json
 
 ## Applying changes
 
-- **Ratio / mode** → apply **instantly** from the dashboard (or `docker kill -s
-  HUP dualpool-proxy` after editing `config.json`), without dropping miners.
+- **Ratio** → applies **instantly** from the dashboard (or `docker kill -s HUP
+  dualpool-proxy` after editing `config.json`), without dropping miners.
+- **Mode / interval** → saved immediately, take effect on `docker compose restart
+  dualpool-proxy`.
 - **Pool URLs / usernames / passwords** → saved immediately, take effect on
   `docker compose restart dualpool-proxy` (a pool swap reconnects the miners on it).
 

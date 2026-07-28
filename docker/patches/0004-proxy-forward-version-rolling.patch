@@ -1,0 +1,76 @@
+diff --git a/src/generator.c b/src/generator.c
+index 2230d14b..fba01fec 100644
+--- a/src/generator.c
++++ b/src/generator.c
+@@ -2039,13 +2039,28 @@ static void *proxy_send(void __maybe_unused *arg)
+ 			continue;
+ 		}
+ 
+-		root = yyjson_mut_pack_val(doc, "{s[sosss]siss}", "params", subproxy->auth,
+-				jobid,
+-				yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "nonce2")),
+-				yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "ntime")),
+-				yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "nonce")),
+-				"id", share_id,
+-				"method", "mining.submit");
++		/* Forward the client's version-rolling (ASICBoost) bits as the 6th
++		 * mining.submit param when present, so the pool rehashes with the same
++		 * rolled version the miner used. Without it every share is "Above target". */
++		const char *version_mask = yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "version_mask"));
++		if (version_mask && strlen(version_mask)) {
++			root = yyjson_mut_pack_val(doc, "{s[sossss]siss}", "params", subproxy->auth,
++					jobid,
++					yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "nonce2")),
++					yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "ntime")),
++					yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "nonce")),
++					version_mask,
++					"id", share_id,
++					"method", "mining.submit");
++		} else {
++			root = yyjson_mut_pack_val(doc, "{s[sosss]siss}", "params", subproxy->auth,
++					jobid,
++					yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "nonce2")),
++					yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "ntime")),
++					yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "nonce")),
++					"id", share_id,
++					"method", "mining.submit");
++		}
+ 		yyjson_mut_doc_set_root(doc, root);
+ 		add_yyjson_msgq(&csmsgq, subproxy, doc);
+ 		send_json_msgq(gdata, &csmsgq);
+diff --git a/src/stratifier.c b/src/stratifier.c
+index 14c07eec..27803faf 100644
+--- a/src/stratifier.c
++++ b/src/stratifier.c
+@@ -6400,15 +6400,19 @@ static void update_client(const stratum_instance_t *client, const int64_t client
+ /* Submit a share in proxy mode to the parent pool. workbase_lock is held.
+  * Needs to be entered with client holding a ref count. */
+ static void submit_share(stratum_instance_t *client, const int64_t jobid, const char *nonce2,
+-			 const char *ntime, const char *nonce)
++			 const char *ntime, const char *nonce, const char *version_mask)
+ {
+ 	yyjson_mut_doc *doc;
+ 	char enonce2[32];
+ 
+ 	sprintf(enonce2, "%s%s", client->enonce1var, nonce2);
+-	doc = yyjson_mut_pack("{sIsssssssIsisi}", "jobid", jobid, "nonce2", enonce2,
++	/* Carry the client's version-rolling (ASICBoost) bits through to the
++	 * generator so proxy_send can forward them upstream; without them the pool
++	 * rehashes with the un-rolled version and rejects every share "Above target". */
++	doc = yyjson_mut_pack("{sIsssssssIsisiss}", "jobid", jobid, "nonce2", enonce2,
+ 			      "ntime", ntime, "nonce", nonce, "client_id", client->id,
+-			      "proxy", client->proxyid, "subproxy", client->subproxyid);
++			      "proxy", client->proxyid, "subproxy", client->subproxyid,
++			      "version_mask", version_mask ? version_mask : "");
+ 	generator_add_send(doc);
+ }
+ 
+@@ -6658,7 +6662,7 @@ out_nowb:
+ 	 * stale shares and filter out the rest. */
+ 	if (wb && wb->proxy && submit) {
+ 		LOGINFO("Submitting share upstream: %s", hexhash);
+-		submit_share(client, id, nonce2, ntime, nonce);
++		submit_share(client, id, nonce2, ntime, nonce, version_mask);
+ 	}
+ 
+ 	add_submit(client, diff, result, submit);

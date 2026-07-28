@@ -23,10 +23,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Never modify the ESP32 firmware project.** The `dual_pool` files are *copied*
   into `src/dual_pool/` with GPLv3 headers, not referenced in place.
 - **Keep pure-logic modules socket-free** (`alloc`, `share_accounting`, `config`,
-  `dual_pool/*`) so T1 unit tests build anywhere. Socket code (`relay`, `health`,
+  `dual_pool/*`) so their unit tests build anywhere. Socket code (`relay`, `health`,
   `webui`) is separate and Linux-only.
-- **TDD:** write the T1 test for a pure module before/with its implementation.
-- Verify every "done" claim by running the actual test/build — evidence first.
 
 ---
 

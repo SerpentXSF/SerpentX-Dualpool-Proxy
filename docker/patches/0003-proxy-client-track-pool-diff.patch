@@ -1,0 +1,42 @@
+diff --git a/src/stratifier.c b/src/stratifier.c
+index 0e8ef0f6..14c07eec 100644
+--- a/src/stratifier.c
++++ b/src/stratifier.c
+@@ -3393,7 +3393,7 @@ static void update_diff(const char *cmd)
+ {
+ 	sdata_t *sdata = ckpool.sdata, *dsdata;
+ 	stratum_instance_t *client, *tmp;
+-	double old_diff, diff;
++	double diff;
+ 	int id = 0, subid = 0;
+ 	const char *buf;
+ 	yyjson_val *val;
+@@ -3438,22 +3438,21 @@ static void update_diff(const char *cmd)
+ 	}
+ 
+ 	ck_wlock(&dsdata->workbase_lock);
+-	old_diff = proxy->diff;
+ 	dsdata->current_workbase->diff = proxy->diff = diff;
+ 	ck_wunlock(&dsdata->workbase_lock);
+ 
+-	if (old_diff < diff)
+-		return;
+-
+-	/* If the diff has dropped, iterate over all the clients and check
+-	 * they're at or below the new diff, and update it if not. */
++	/* Sync every client on this subproxy to the pool-dictated diff, whether it
++	 * rose or fell. Proxy mode forwards only shares meeting the upstream diff, so
++	 * a client left below it (e.g. pinned to its own low mining.suggest_difficulty)
++	 * has virtually none of its shares forwarded and looks dead to high-difficulty
++	 * pools like public-pool.io. The stock code only ever lowered clients. */
+ 	ck_rlock(&sdata->instance_lock);
+ 	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
+ 		if (client->proxyid != id)
+ 			continue;
+ 		if (client->subproxyid != subid)
+ 			continue;
+-		if (client->diff > diff) {
++		if (client->diff != diff) {
+ 			client->diff = diff;
+ 			stratum_send_diff(sdata, client);
+ 		}

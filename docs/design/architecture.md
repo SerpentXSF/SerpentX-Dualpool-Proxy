@@ -2,6 +2,12 @@
 
 **License:** GPLv3 (derivative of ckpool)
 
+> **Note:** this is the original design document. It captures intent and rationale;
+> a few details evolved during implementation (for example, time-slice recycles the
+> connection rather than using `set_extranonce`, and allocation is by connection
+> count today with hashrate-weighting on the roadmap). For current behavior, the
+> code and [CONFIGURATION.md](../CONFIGURATION.md) are authoritative.
+
 ---
 
 ## 1. Purpose
@@ -40,10 +46,10 @@ not a nice-to-have.
 
 **Honest baseline we beat:** HAProxy `balance` with server weights 70/30 across
 two ckproxy backends gives ~80% of farm-split mode with zero new code. Our
-splitter earns its existence through four things HAProxy cannot do:
-**hashrate-weighted** (not connection-weighted) allocation, **per-pool share
-accounting**, **donation/recovery** logic, and the **web UI**. This is stated
-plainly in the README because it is the first question any reviewer asks.
+splitter earns its existence through things HAProxy cannot do: **correct-by-
+construction share routing**, **per-pool share accounting**, **donation/recovery**
+logic, and the **web UI**. (Allocation is by miner count today; hashrate-weighting
+is on the roadmap.)
 
 ---
 
@@ -281,4 +287,3 @@ health, webui) is Linux/epoll and runs under WSL/Docker.
 6. Optional single-miner time-slice mode (capability-gated). (`time_slice`)
 7. Dockerize + web UI + README + config example + T2/T3 harness. (`webui`,
    Docker, tests)
-```

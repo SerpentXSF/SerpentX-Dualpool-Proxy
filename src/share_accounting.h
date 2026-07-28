@@ -56,10 +56,18 @@ void share_session_set_difficulty(share_session_t *s, double diff);
  * current difficulty as this share's weight. */
 void share_session_on_submit(share_session_t *s, long id);
 
+/* Outcome of a result, so callers can also keep per-connection tallies. */
+typedef struct {
+    bool   counted;    /* the id matched a pending submit */
+    bool   accepted;   /* accepted (true) or rejected (false); only if counted */
+    double diff;       /* the share's difficulty weight; only if counted */
+} share_result_t;
+
 /* Record a result for a previously-submitted id. If the id is unknown or already
- * consumed, it is ignored. Otherwise the share's snapshotted difficulty is added
- * to the accepted or rejected tally for this session's pool. */
-void share_session_on_result(share_session_t *s, long id, bool accepted,
-                             share_totals_t *t);
+ * consumed, it is ignored (counted=false). Otherwise the share's snapshotted
+ * difficulty is added to the accepted or rejected tally for this session's pool,
+ * and the outcome is returned. */
+share_result_t share_session_on_result(share_session_t *s, long id, bool accepted,
+                                       share_totals_t *t);
 
 #endif /* DUALPOOL_SHARE_ACCOUNTING_H */

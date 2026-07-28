@@ -1,17 +1,45 @@
 # Dual-Pool Proxy — Dual-Pool Stratum Proxy. Multi-stage: build stock ckpool (ckproxy),
 # build our splitter, assemble a small runtime image. GPLv3.
 
-# ---- Stage 1: build stock ckpool (unmodified) -> ckproxy/ckpmsg -------------
+# ---- Stage 1: build stock ckpool -> ckproxy/ckpmsg ---------------------------
 FROM debian:bookworm-slim AS ckpool-build
-ARG CKPOOL_REF=master
+# Pinned to v1.2.0. Unlike the older releases it already carries the proxy
+# notify-keying fix AND the modern Stratum-V1 protocol support (error-tuple
+# parsing + difficulty handling) that solo.ckpool and public-pool.io require, so
+# it works with modern pools as well as Kryptex-style ones. v1.2.0's one blocker
+# was a double-free in generator.c parse_share() that aborted the proxyrecv thread
+# within seconds of shares flowing (diagnosed from a core dump). We fix it with
+# docker/patches/0002-proxy-recv-double-free.patch. ckpool is otherwise unmodified.
+#
+# The legacy jansson release v1.0.0 is still selectable (--build-arg CKPOOL_REF=v1.0.0);
+# it needs 0001 instead but cannot speak modern pools' protocol. See
+# docker/patches/README.md.
+ARG CKPOOL_REF=v1.2.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential git yasm pkg-config libtool autoconf automake \
       ca-certificates libzmq3-dev \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN git clone --depth 1 --branch "${CKPOOL_REF}" https://github.com/ckolivas/ckpool.git \
- || git clone --depth 1 https://github.com/ckolivas/ckpool.git
+# Clone the exact pinned ref. Do NOT fall back to master: the patches below target
+# a specific version, and silently building an unpinned tree would apply them to
+# the wrong base.
+RUN git clone --depth 1 --branch "${CKPOOL_REF}" https://github.com/ckolivas/ckpool.git
+COPY docker/patches/ /src/patches/
 WORKDIR /src/ckpool
+# Apply the bug fix matching the pinned ref. Fail the build if the expected patch
+# does not apply cleanly rather than silently shipping a crash/corruption bug.
+RUN if [ "${CKPOOL_REF}" = "v1.2.0" ]; then \
+      echo "Applying v1.2.0 patches: 0002 (double-free), 0003 (track pool diff), 0004 (forward version-rolling)..." && \
+      git apply -v /src/patches/0002-proxy-recv-double-free.patch && \
+      git apply -v /src/patches/0003-proxy-client-track-pool-diff.patch && \
+      git apply -v /src/patches/0004-proxy-forward-version-rolling.patch ; \
+    elif [ "${CKPOOL_REF}" = "v1.0.0" ]; then \
+      echo "Applying v1.0.0 patches: 0001 (notify-keying), 0002 (double-free)..." && \
+      git apply -v /src/patches/0001-proxy-notify-keying.patch && \
+      git apply -v /src/patches/0002-proxy-recv-double-free.patch ; \
+    else \
+      echo "CKPOOL_REF=${CKPOOL_REF}: no matching backport patch, building stock." ; \
+    fi
 RUN ./autogen.sh && ./configure && make -j"$(nproc)"
 RUN mkdir -p /out && \
     cp src/ckpool /out/ckpool && \

@@ -48,14 +48,15 @@ POST_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
 sleep 0.3
 NEW_RATIO=$(curl -s "http://127.0.0.1:$WEB/api/status" | python3 -c 'import sys,json;print(json.load(sys.stdin)["ratio_a"])')
 
-# parse status fields
-read RATIO SA SB PA PB MINERS <<<"$(echo "$STATUS" | python3 -c '
+# parse status fields (incl. per-miner accepted total)
+read RATIO SA SB PA PB MINERS PERMINER <<<"$(echo "$STATUS" | python3 -c '
 import sys,json
 d=json.load(sys.stdin)
 print(d["ratio_a"],
       d["pools"][0]["accepted"], d["pools"][1]["accepted"],
       d["pools"][0]["state"], d["pools"][1]["state"],
-      len(d["miners"]))')"
+      len(d["miners"]),
+      sum(m["accepted"] for m in d["miners"]))')"
 
 echo "-------------------------------------------"
 echo "status: ratio_a=$RATIO poolA.accepted=$SA poolB.accepted=$SB state=$PA/$PB miners=$MINERS"
@@ -71,6 +72,9 @@ TOTAL_ACC=$((SA + SB))
 [ "$TOTAL_ACC" -eq 40 ] || { echo "FAIL: accepted shares $TOTAL_ACC != 40"; fail=1; }
 [ "$SA" -gt "$SB" ] || { echo "FAIL: pool A should have more shares at 70/30 (A=$SA B=$SB)"; fail=1; }
 [ "${MINERS:-0}" -ge 1 ] || { echo "FAIL: no connected miners shown in status"; fail=1; }
+# per-miner accepted must be populated (should equal the pool totals: 40)
+[ "${PERMINER:-0}" -eq "$TOTAL_ACC" ] || { echo "FAIL: per-miner accepted sum=$PERMINER != pool total $TOTAL_ACC"; fail=1; }
+echo "per-miner accepted sum: $PERMINER (matches pool total $TOTAL_ACC)"
 [ "$HTML_CODE" = "200" ] && [ "$TITLE_OK" -ge 1 ] || { echo "FAIL: dashboard did not serve"; fail=1; }
 [ "$POST_CODE" = "200" ] && [ "$NEW_RATIO" = "40" ] || { echo "FAIL: config hot-apply (code=$POST_CODE ratio=$NEW_RATIO)"; fail=1; }
 [ "${METRICS_OK:-0}" -ge 1 ] || { echo "FAIL: /metrics did not expose dualpool_pool_up"; fail=1; }

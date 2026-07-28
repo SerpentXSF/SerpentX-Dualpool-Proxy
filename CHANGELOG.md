@@ -15,6 +15,38 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ---
 
+## X.3 — Proxied miners now mine valid shares on real pools
+
+This release fixes the core issue that made proxied miners' shares get rejected or
+go uncredited at upstream pools while the local dashboard looked healthy. With real
+hardware (BitAxe, NerdAxe, NerdQAxe, HammerMiner) pointed at the proxy, forwarded
+shares are now accepted upstream and the proxy worker registers at the pool with
+its full hashrate.
+
+The root causes were all in **stock ckpool's proxy mode**. We now pin **ckpool
+v1.2.0** and apply minimal, build-time bug-fix patches (documented in
+[`docker/patches/`](docker/patches/README.md)); ckpool is otherwise unmodified:
+
+- **ASICBoost version-rolling was dropped on forwarded shares** — the main bug.
+  Miners roll the block version for efficiency and find shares with the *rolled*
+  version, but the proxy forwarded `mining.submit` without the version bits, so the
+  pool rehashed with the original version and rejected every share as *"Above
+  target"* / invalid. The version bits are now carried through and forwarded.
+  (`0004`)
+- **Proxied miners weren't driven to the pool's difficulty.** They stayed pinned to
+  their own low suggested difficulty, so almost none of their shares met the pool's
+  requirement and the worker looked dead at the pool. Clients now track the
+  pool-dictated difficulty in both directions. (`0003`)
+- **A crash (SIGABRT) under share load** — a double-free in ckpool's proxy receive
+  path — is fixed. (`0002`)
+
+New feature: **per-pool `startdiff` / `mindiff`** in the pool config, for pools that
+enforce a difficulty floor.
+
+Verified with real miners against solo.ckpool and Kryptex: forwarded shares
+accepted 100% (packet-capture-confirmed), worker registered upstream with full
+hashrate, zero crashes over sustained runs.
+
 ## X.2.5 — Renamed the product to "Dual-Pool Proxy"
 
 The tool is now named **Dual-Pool Proxy**; **SerpentX** is the maker/house brand
@@ -66,8 +98,8 @@ stock-firmware SHA-256 miner across two pools at once, built on unmodified
 [ckpool](https://github.com/ckolivas/ckpool).
 
 **Core**
-- Hashrate-weighted **farm-split** allocation (mixed fleets split by work, not
-  miner count).
+- **Farm-split** allocation — each miner pinned to one pool to approach the target
+  ratio (by miner count; hashrate-weighting is planned).
 - Single-miner **time-slice** mode (connection-recycling; works with any miner).
 - Per-pool **failover** plus pool-level **donation, eviction, and recovery**.
 - Correct share routing by construction; per-pool **difficulty-weighted

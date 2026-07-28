@@ -37,9 +37,10 @@ void share_session_on_submit(share_session_t *s, long id)
     s->pending[slot].used = true;
 }
 
-void share_session_on_result(share_session_t *s, long id, bool accepted,
-                             share_totals_t *t)
+share_result_t share_session_on_result(share_session_t *s, long id, bool accepted,
+                                       share_totals_t *t)
 {
+    share_result_t r = { false, false, 0.0 };
     for (int i = 0; i < SHARE_PENDING_MAX; i++) {
         if (s->pending[i].used && s->pending[i].id == id) {
             double d = s->pending[i].diff;
@@ -51,8 +52,10 @@ void share_session_on_result(share_session_t *s, long id, bool accepted,
                 t->rejected_n[s->pool]    += 1;
             }
             s->pending[i].used = false;   /* consume: no double count */
-            return;
+            r.counted = true; r.accepted = accepted; r.diff = d;
+            return r;
         }
     }
     /* Unknown or already-consumed id: ignore. */
+    return r;
 }

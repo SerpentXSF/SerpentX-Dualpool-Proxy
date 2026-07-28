@@ -81,15 +81,16 @@ Open `http://<host-ip>:8080`. You should see:
 - **Accepted/rejected** shares per pool.
 
 If a pool shows `off`, check its `host:port`/credentials in `.env` or
-`config.json`. Changes to the ratio/mode apply live from the dashboard's
-**Settings** form (no miner disconnects).
+`config.json`. A **ratio** change from the dashboard's **Settings** form applies
+live with no miner disconnects; mode, interval, and pool changes are saved and take
+effect after `docker compose restart dualpool-proxy`.
 
 ---
 
 ## 5. Which mode? (farm-split vs time-slice)
 
 - **`farm_split` (default)** — best for **2+ miners**. Each miner is assigned to
-  one pool (weighted by its hashrate) and stays there. Zero switching loss.
+  one pool to hit your target ratio and stays there. Zero switching loss.
 - **`time_slice`** — for a **single miner** that must itself split across both
   pools. The miner is recycled onto the next pool every `interval_ms`. Works with
   any miner; costs a few stale shares per switch (keep the interval in minutes).
@@ -126,5 +127,5 @@ docker kill -s HUP dualpool-proxy         # hot-reload config.json without resta
 | Pool shows `off` | Wrong `host:port` or the pool is down. Check logs. |
 | Miner won't connect | Confirm `stratum+tcp://<host>:3333` and that port 3333 is reachable on your LAN / firewall. |
 | Dashboard needs a key | You set `WEB_PASSWORD`. Enter it when prompted (stored in your browser). |
-| Split looks off with 1–2 miners | Expected — with few miners the split is coarse; it's weighted by hashrate, not miner count. See CONFIGURATION.md. |
+| Split looks off with 1–2 miners | Expected — allocation is by miner count, so with few miners the split is coarse. See CONFIGURATION.md. |
 | Build fails on `git clone ckpool` | Network/DNS during `docker build`. Retry; the ckpool clone needs internet. |

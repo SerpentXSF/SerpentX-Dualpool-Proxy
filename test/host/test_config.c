@@ -17,7 +17,7 @@ static const char *FULL =
 "  \"web_password\": \"secret\","
 "  \"pools\": ["
 "    { \"url\": \"poolA:3333\", \"user\": \"walletA.w1\", \"pass\": \"x\","
-"      \"ckproxy_mode\": \"userproxy\","
+"      \"ckproxy_mode\": \"userproxy\", \"startdiff\": 100000, \"mindiff\": 50000,"
 "      \"failover\": { \"url\": \"backupA:3333\", \"user\": \"walletA.w1\", \"pass\": \"y\" } },"
 "    { \"url\": \"poolB:3333\", \"user\": \"walletB.w1\", \"pass\": \"z\" }"
 "  ]"
@@ -41,6 +41,11 @@ static void test_parse_full(void) {
     assert(strcmp(c.pools[0].failover.pass, "y") == 0);
     assert(c.pools[1].has_failover == false);
     assert(strcmp(c.pools[1].primary.pass, "z") == 0);
+    /* per-pool difficulty: set on A, unset (0 => default) on B */
+    assert(c.pools[0].startdiff == 100000);
+    assert(c.pools[0].mindiff == 50000);
+    assert(c.pools[1].startdiff == 0);
+    assert(c.pools[1].mindiff == 0);
 }
 
 /* Optional fields get sane defaults. */
@@ -104,8 +109,26 @@ static void test_ckproxy_emit(void) {
     json_t *surl = json_object_get(root, "serverurl");
     assert(json_is_array(surl) && json_array_size(surl) >= 1);
     assert(strstr(json_string_value(json_array_get(surl, 0)), "4001") != NULL);
-
+    /* pool A carried explicit per-pool difficulty into the ckproxy config */
+    assert(json_integer_value(json_object_get(root, "startdiff")) == 100000);
+    assert(json_integer_value(json_object_get(root, "mindiff")) == 50000);
     json_decref(root);
+
+    /* A pool with NO failover gets exactly ONE proxy entry (never duplicate the
+     * primary — see ckproxy_config.c: duplicate entries corrupt shares on the
+     * classic ckpool build). */
+    char pathb[] = "/tmp/dualpool_ckproxyB.json";
+    assert(ckproxy_config_write(&c.pools[1], 4002, "/tmp/sockB", pathb,
+                                err, sizeof(err)) == 0);
+    json_t *rb = json_load_file(pathb, 0, &je);
+    assert(rb);
+    json_t *pb = json_object_get(rb, "proxy");
+    assert(json_is_array(pb) && json_array_size(pb) == 1);
+    assert(strcmp(json_string_value(json_object_get(json_array_get(pb, 0), "url")), "poolB:3333") == 0);
+    /* pool B set no difficulty => ckproxy config falls back to built-in defaults */
+    assert(json_integer_value(json_object_get(rb, "startdiff")) == 42);
+    assert(json_integer_value(json_object_get(rb, "mindiff")) == 1);
+    json_decref(rb);
 }
 
 int main(void) {

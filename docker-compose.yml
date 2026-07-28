@@ -14,5 +14,7 @@ services:
       - "8080:8080"    # web dashboard  (http://<host>:8080)
     volumes:
       - ./config:/config
+    # .env is optional: you can configure entirely via ./config/config.json instead.
     env_file:
-      - .env
+      - path: .env
+        required: false

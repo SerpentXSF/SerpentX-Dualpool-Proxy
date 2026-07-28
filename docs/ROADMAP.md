@@ -56,8 +56,9 @@ with centralized hashrate. Tags: **[quick-win]** small, **[medium]** moderate,
 ## Packaging & distribution
 - **[medium] Umbrel + Start9 packages** — where this audience already runs
   public-pool and DATUM.
-- **[quick-win] Persist full config edits** (pools too) from the dashboard with a
-  guided ckproxy restart.
+- **[quick-win] Guided ckproxy restart** from the dashboard after a pool or
+  credential edit (the edit is already persisted to `config.json`; today it needs a
+  manual `docker compose restart`).
 
 ---
 

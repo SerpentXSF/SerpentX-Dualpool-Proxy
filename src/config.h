@@ -21,6 +21,8 @@ typedef struct {
     bool       has_failover;
     endpoint_t failover;
     char       ckproxy_mode[16];   /* "proxy" or "userproxy" (default userproxy) */
+    int        startdiff;          /* per-pool ckproxy startdiff; 0 => built-in default */
+    int        mindiff;            /* per-pool ckproxy mindiff;   0 => built-in default */
 } pool_cfg_t;
 
 typedef struct {

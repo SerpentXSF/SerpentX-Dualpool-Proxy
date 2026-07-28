@@ -34,6 +34,8 @@ static int parse_endpoint(json_t *o, endpoint_t *ep, char *err, size_t errlen)
     return 0;
 }
 
+static int int_or(json_t *o, const char *key, int dflt);
+
 static int parse_pool(json_t *o, pool_cfg_t *p, char *err, size_t errlen)
 {
     if (parse_endpoint(o, &p->primary, err, errlen) != 0) return -1;
@@ -50,6 +52,14 @@ static int parse_pool(json_t *o, pool_cfg_t *p, char *err, size_t errlen)
     const char *m = (mode && json_is_string(mode)) ? json_string_value(mode) : "userproxy";
     if (strcmp(m, "proxy") != 0 && strcmp(m, "userproxy") != 0) m = "userproxy";
     snprintf(p->ckproxy_mode, sizeof(p->ckproxy_mode), "%s", m);
+
+    /* Optional per-pool difficulty. 0 (or absent/negative) => use ckproxy_config's
+     * built-in default. Lets each upstream run at the difficulty it requires — e.g.
+     * public-pool.io needs ~100000 while a low-diff pool is fine at the default. */
+    p->startdiff = int_or(o, "startdiff", 0);
+    if (p->startdiff < 0) p->startdiff = 0;
+    p->mindiff = int_or(o, "mindiff", 0);
+    if (p->mindiff < 0) p->mindiff = 0;
     return 0;
 }
 

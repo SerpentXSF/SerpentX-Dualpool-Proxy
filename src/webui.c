@@ -128,10 +128,14 @@ static void *client_thread(void *arg)
     char method[8] = {0}, path[1024] = {0};
     sscanf(req, "%7s %1023s", method, path);
 
-    /* protected endpoints require the key when a password is set */
-    int is_api = !strncmp(path, "/api/", 5) || !strcmp(path, "/metrics");
+    /* protected endpoints require the key when a password is set. Match /metrics
+     * up to any '?' so a query string (e.g. /metrics?x=1) cannot skip the auth
+     * check while the prefix-matching handler below still serves it. */
+    int is_api = !strncmp(path, "/api/", 5) ||
+                 (!strncmp(path, "/metrics", 8) && (path[8] == '\0' || path[8] == '?'));
     if (is_api && !authorized(req, path)) {
-        respond(fd, "401 Unauthorized", "application/json", "{\"error\":\"unauthorized\"}", 23);
+        const char *body401 = "{\"error\":\"unauthorized\"}";
+        respond(fd, "401 Unauthorized", "application/json", body401, strlen(body401));
         close(fd);
         return NULL;
     }
@@ -151,7 +155,12 @@ static void *client_thread(void *arg)
         long clen = 0;
         char *cl = strcasestr(req, "Content-Length:");
         if (cl) clen = atol(cl + 15);
+        /* Clamp: a negative Content-Length would make malloc(0) then overflow on
+         * the memcpy below; an absurd one is an OOM DoS. Config bodies are tiny. */
+        if (clen < 0) clen = 0;
+        if (clen > 262144) clen = 262144;
         size_t have = strlen(body);
+        if (have > (size_t)clen) have = (size_t)clen;
         char *full = malloc((size_t)clen + 1);
         if (full) {
             memcpy(full, body, have);

@@ -1,0 +1,12 @@
+diff --git a/src/generator.c b/src/generator.c
+index 2230d14b..677e9e46 100644
+--- a/src/generator.c
++++ b/src/generator.c
+@@ -1849,7 +1849,6 @@ static int parse_share(gdata_t *gdata, proxy_instance_t *proxi, const char *buf)
+ 	HASH_FIND_I64(gdata->shares, &id, share);
+ 	if (share) {
+ 		HASH_DEL(gdata->shares, share);
+-		free(share);
+ 	}
+ 	mutex_unlock(&gdata->share_lock);
+ 
