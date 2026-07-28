@@ -1,5 +1,5 @@
 /*
- * test_health.c — SerpentX tests for the pool health tracker (wraps
+ * test_health.c — Dual-Pool Proxy tests for the pool health tracker (wraps
  * pool_failover). GPLv3. Pure logic, no sockets/jansson.
  */
 #include <assert.h>

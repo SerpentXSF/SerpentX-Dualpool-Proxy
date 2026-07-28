@@ -3,7 +3,7 @@
 # miner that reconnects each time it's recycled at a slice boundary should land
 # on alternating pools so the long-run split tracks --ratio. (Boundary churn is
 # the documented cost; interval is minute-scale in production.) Run in
-# serpentx-dev. GPLv3.
+# dualpool-dev. GPLv3.
 set -u
 cd "$(dirname "$0")/../.."
 BIN=/tmp/sx_ts_splitter
@@ -13,8 +13,8 @@ RATIO=50
 BOUNDARIES=14
 
 echo "== compiling =="
-make serpentx-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
-cp serpentx-splitter "$BIN"
+make dualpool-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
+cp dualpool-splitter "$BIN"
 
 cd test/integration
 python3 fake_upstream.py --port 4201 --tag A --log /dev/null >/dev/null 2>&1 & UPA=$!

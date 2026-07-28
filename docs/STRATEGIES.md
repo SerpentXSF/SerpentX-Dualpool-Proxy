@@ -2,7 +2,7 @@
 
 You will never out-hash Foundry or AntPool. But a home miner *can* win on four
 things centralized farms can't easily take from you: **sovereignty**,
-**variance shaping**, **fee-sharing pool choice**, and **visibility**. SerpentX
+**variance shaping**, **fee-sharing pool choice**, and **visibility**. Dual-Pool Proxy
 is built to deliver all four. This page is the honest playbook — including what's
 real and what's hype.
 
@@ -22,7 +22,7 @@ without giving up your regular income.
 - A 70/30 split ≈ 70% steady cashflow + a 30%-sized lottery ticket.
 - Block-finding is *memoryless*: "pool luck" has **zero** predictive power.
   Anything marketed as "luck-based switching" is the gambler's fallacy in a config
-  file. SerpentX deliberately does **simultaneous** splitting, not switching, so
+  file. Dual-Pool Proxy deliberately does **simultaneous** splitting, not switching, so
   it's immune to that trap and to PPLNS/TIDES window games.
 
 Solo odds are real but long: a ~1.2 TH/s BitAxe is roughly a 1-in-tens-of-
@@ -35,7 +35,7 @@ blocks. Size your solo leg like a lottery ticket you can afford, not a plan.
 
 The single biggest edge is building your **own** block templates on your **own**
 node, instead of renting work from a distant pool. Two mature, MIT-licensed ways,
-both of which SerpentX can point a pool at with **zero extra config** (they're
+both of which Dual-Pool Proxy can point a pool at with **zero extra config** (they're
 local Stratum V1 endpoints):
 
 - **[DATUM Gateway](https://github.com/OCEAN-xyz/datum_gateway) (OCEAN / TIDES).**
@@ -85,7 +85,7 @@ A reasonable default: **small fleet →** FPPS (steady) + solo (lottery);
 ## 3. Efficiency & share correctness (protect the revenue you have)
 
 - **Version rolling / ASICBoost** (`mining.configure`) must pass through
-  correctly — a wrong version mask silently costs efficiency. SerpentX pins each
+  correctly — a wrong version mask silently costs efficiency. Dual-Pool Proxy pins each
   miner to one pool per session so its ckproxy negotiates the mask cleanly.
 - **Low latency** matters more than "better templates": a solo/DATUM pool on your
   **LAN** delivers new-block work in ~ms vs 50–150ms to a distant pool, cutting
@@ -98,10 +98,10 @@ A reasonable default: **small fleet →** FPPS (steady) + solo (lottery);
 
 ## 4. Visibility centralized pools don't give you
 
-- **Per-pool share accounting** is built in — you can compare SerpentX's own
+- **Per-pool share accounting** is built in — you can compare Dual-Pool Proxy's own
   accepted/rejected counts against what each pool *reports* ("trust but verify").
 - **Prometheus `/metrics`** + the bundled
-  [Grafana dashboard](../grafana/serpentx-dashboard.json): watch the realized
+  [Grafana dashboard](../grafana/dualpool-dashboard.json): watch the realized
   split, accept/reject rates, and pool up/down over time.
 - Pair with device tooling — [pyasic](https://github.com/UpstreamData/pyasic)
   (LAN discovery, J/TH), [AxeOS/ESP-Miner](https://github.com/skot/ESP-Miner)

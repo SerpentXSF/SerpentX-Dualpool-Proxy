@@ -1,7 +1,7 @@
 /*
- * health.h — per-pool up/down tracker for SerpentX, wrapping pool_failover.
+ * health.h — per-pool up/down tracker for Dual-Pool Proxy, wrapping pool_failover.
  *
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3 (derivative of ckpool).
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3 (derivative of ckpool).
  * Copyright (C) 2025-2026 The SerpentX authors.
  *
  * A background probe reports each pool's reachability; this turns a stream of
@@ -10,8 +10,8 @@
  * splitter uses the verdict to stop allocating to a dead pool (donation) and to
  * evict its pinned miners.
  */
-#ifndef SERPENTX_HEALTH_H
-#define SERPENTX_HEALTH_H
+#ifndef DUALPOOL_HEALTH_H
+#define DUALPOOL_HEALTH_H
 
 #include <stdbool.h>
 #include "pool_scheduler.h"   /* pool_id_t */
@@ -30,4 +30,4 @@ void health_report(health_t *h, pool_id_t p, bool connected);
 /* True if the pool is usable (not DOWN). Pools start assumed-up. */
 bool health_pool_up(const health_t *h, pool_id_t p);
 
-#endif /* SERPENTX_HEALTH_H */
+#endif /* DUALPOOL_HEALTH_H */

@@ -40,7 +40,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] Port the existing dual_pool host tests; `make -C test/host run` passes
       (gcc 15.2 under WSL — no native Windows gcc; WSL is the build env).
 - [x] `git init` + commits; `.gitattributes` enforces LF for Linux/Docker sources.
-- [x] **(pulled from M7)** `web/index.html` — branded SerpentX dashboard shell,
+- [x] **(pulled from M7)** `web/index.html` — branded Dual-Pool Proxy dashboard shell,
       verified rendering live with demo-data fallback.
 
 ## Milestone 1 — Build ckpool in Docker  `[x]`
@@ -62,7 +62,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 ## Milestone 3 — Config + supervise two ckproxy  `[x]`
 
 - [x] `config.{c,h}` — parse our JSON (jansson), defaults, clamps, two-pool
-      validation. **Test passing** (in serpentx-dev image; WSL lacks jansson).
+      validation. **Test passing** (in dualpool-dev image; WSL lacks jansson).
 - [x] `ckproxy_config.{c,h}` — emit `ckproxy{A,B}.json` (proxy array + failover +
       serverurl) and `ckproxy_spawn` (fork/exec `-p`/`-u`, console output ->
       per-proxy log file). **Emit test passing.**
@@ -143,8 +143,8 @@ ckproxy/endpoint unreachability. Tracked for M7 polish.
       ratio 70, 20 miners, pools on), dashboard served, config hot-applied 70->40.
 - [x] Multi-stage `Dockerfile` + `docker-compose.test.yml` (T3 full stack).
 - [x] **T3** full-stack compose test: both ckproxy up + farm-split routing.
-- [x] Prometheus `/metrics` + bundled `grafana/serpentx-dashboard.json`.
-- [x] Optional dashboard password (`X-SerpentX-Key` / `?key=`), auth-checked
+- [x] Prometheus `/metrics` + bundled `grafana/dualpool-dashboard.json`.
+- [x] Optional dashboard password (`X-DualPool-Key` / `?key=`), auth-checked
       `/api` + `/metrics`; dashboard sends the key.
 - [x] `POST /api/config` persists ratio/mode/interval to the config file; SIGHUP
       hot-reloads without dropping miners. Dashboard comes up before ckproxy wait.

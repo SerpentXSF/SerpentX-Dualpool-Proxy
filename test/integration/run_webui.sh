@@ -2,7 +2,7 @@
 # M7 web dashboard test: splitter (CLI mode, direct to two fake pools) with the
 # dashboard on :8080. Drives miners, then checks /api/status reflects the split
 # and per-pool shares, static index.html serves, and POST /api/config hot-applies
-# a ratio change. Run in the serpentx-dev image. GPLv3.
+# a ratio change. Run in the dualpool-dev image. GPLv3.
 set -u
 cd "$(dirname "$0")/../.."
 BIN=/tmp/sx_web_splitter
@@ -10,8 +10,8 @@ PORT=3335
 WEB=8090
 
 echo "== compiling =="
-make serpentx-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
-cp serpentx-splitter "$BIN"
+make dualpool-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
+cp dualpool-splitter "$BIN"
 
 cd test/integration
 python3 fake_upstream.py --port 4101 --tag A --log /dev/null >/dev/null 2>&1 & UPA=$!
@@ -36,10 +36,10 @@ echo "$STATUS" | head -c 400; echo; echo "..."
 
 echo "== GET / (static dashboard) =="
 HTML_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WEB/")
-TITLE_OK=$(curl -s "http://127.0.0.1:$WEB/" | grep -c "SerpentX")
+TITLE_OK=$(curl -s "http://127.0.0.1:$WEB/" | grep -c "Dual-Pool Proxy")
 
 echo "== GET /metrics (Prometheus) =="
-METRICS_OK=$(curl -s "http://127.0.0.1:$WEB/metrics" | grep -c "serpentx_pool_up")
+METRICS_OK=$(curl -s "http://127.0.0.1:$WEB/metrics" | grep -c "dualpool_pool_up")
 
 echo "== POST /api/config (ratio 70 -> 40) =="
 POST_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
@@ -59,7 +59,7 @@ print(d["ratio_a"],
 
 echo "-------------------------------------------"
 echo "status: ratio_a=$RATIO poolA.accepted=$SA poolB.accepted=$SB state=$PA/$PB miners=$MINERS"
-echo "static /: HTTP $HTML_CODE (SerpentX in page: $TITLE_OK)"
+echo "static /: HTTP $HTML_CODE (Dual-Pool Proxy in page: $TITLE_OK)"
 echo "POST /api/config: HTTP $POST_CODE ; ratio now $NEW_RATIO"
 echo "-------------------------------------------"
 
@@ -73,8 +73,8 @@ TOTAL_ACC=$((SA + SB))
 [ "${MINERS:-0}" -ge 1 ] || { echo "FAIL: no connected miners shown in status"; fail=1; }
 [ "$HTML_CODE" = "200" ] && [ "$TITLE_OK" -ge 1 ] || { echo "FAIL: dashboard did not serve"; fail=1; }
 [ "$POST_CODE" = "200" ] && [ "$NEW_RATIO" = "40" ] || { echo "FAIL: config hot-apply (code=$POST_CODE ratio=$NEW_RATIO)"; fail=1; }
-[ "${METRICS_OK:-0}" -ge 1 ] || { echo "FAIL: /metrics did not expose serpentx_pool_up"; fail=1; }
-echo "metrics: serpentx_pool_up lines=$METRICS_OK"
+[ "${METRICS_OK:-0}" -ge 1 ] || { echo "FAIL: /metrics did not expose dualpool_pool_up"; fail=1; }
+echo "metrics: dualpool_pool_up lines=$METRICS_OK"
 
 if [ "$fail" -eq 0 ]; then
   echo "WEBUI PASS: /api/status live, dashboard served, /api/config hot-applied."

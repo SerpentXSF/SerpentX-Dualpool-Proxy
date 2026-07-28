@@ -1,6 +1,6 @@
-# Getting Started with SerpentX
+# Getting Started with Dual-Pool Proxy
 
-SerpentX makes **any** Stratum SHA-256 miner mine to **two pools at once** in a
+Dual-Pool Proxy makes **any** Stratum SHA-256 miner mine to **two pools at once** in a
 ratio you pick, with per-pool failover — no firmware changes. This guide gets you
 running in a few minutes.
 
@@ -27,7 +27,7 @@ setup, see [STRATEGIES.md](STRATEGIES.md).)
 git clone https://github.com/SerpentXSF/SerpentX-Dualpool-Proxy.git
 cd SerpentX-Dualpool-Proxy
 cp .env.example .env          # edit your two pools + ratio
-docker compose up -d --build  # builds ckpool + SerpentX, starts everything
+docker compose up -d --build  # builds ckpool + Dual-Pool Proxy, starts everything
 ```
 
 Edit `.env` with your pools before (or after) starting — at minimum:
@@ -54,16 +54,16 @@ The container exposes two ports:
 
 ---
 
-## 3. Point your miners at SerpentX
+## 3. Point your miners at Dual-Pool Proxy
 
 On each miner's web UI (AxeOS, Antminer UI, etc.), set the **primary pool** to:
 
 ```
-stratum+tcp://<serpentx-host-ip>:3333
+stratum+tcp://<host-ip>:3333
 ```
 
 Use your normal pool username/worker name and password (`x` is fine). That's it —
-SerpentX presents itself as one pool and splits behind the scenes.
+Dual-Pool Proxy presents itself as one pool and splits behind the scenes.
 
 **Tip:** you don't need to change usernames per miner. In the default `userproxy`
 mode, each miner's worker name is preserved upstream so you still see it on the
@@ -73,7 +73,7 @@ pool's own dashboard.
 
 ## 4. Verify on the dashboard
 
-Open `http://<serpentx-host-ip>:8080`. You should see:
+Open `http://<host-ip>:8080`. You should see:
 
 - **Both pools** as `online`.
 - The **actual-vs-target split** bar filling in as miners connect.
@@ -102,10 +102,10 @@ dashboard.
 ## 6. Common commands
 
 ```bash
-docker compose logs -f serpentx     # watch logs
-docker compose restart serpentx     # restart
+docker compose logs -f dualpool-proxy     # watch logs
+docker compose restart dualpool-proxy     # restart
 docker compose down                 # stop
-docker kill -s HUP serpentx         # hot-reload config.json without restart
+docker kill -s HUP dualpool-proxy         # hot-reload config.json without restart
 ```
 
 ---
@@ -116,7 +116,7 @@ docker kill -s HUP serpentx         # hot-reload config.json without restart
 - **Get a real edge (decentralize, reduce variance, self-host):**
   [STRATEGIES.md](STRATEGIES.md)
 - **Monitoring with Prometheus + Grafana:** import
-  [`grafana/serpentx-dashboard.json`](../grafana/serpentx-dashboard.json); metrics
+  [`grafana/dualpool-dashboard.json`](../grafana/dualpool-dashboard.json); metrics
   are at `http://<host>:8080/metrics`.
 
 ## Troubleshooting

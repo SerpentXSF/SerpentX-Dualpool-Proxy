@@ -1,7 +1,7 @@
 /*
  * pool_failover.h — per-pool primary->failover->down state machine.
  *
- * Part of SerpentX (Dual-Pool Stratum Proxy).
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy).
  * Copyright (C) 2025-2026 The SerpentX authors.
  *
  * Provenance: originally written by the author for the BitAxe/NerdAxe ESP32

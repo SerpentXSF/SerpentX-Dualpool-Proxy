@@ -2,7 +2,7 @@
 # Failover integration test (M5): real splitter (CLI mode) + two fake upstreams.
 # Verifies pool-DOWN donation (new miners go to the survivor), eviction (a dead
 # pool's pinned miners are disconnected), and recovery (traffic returns when the
-# pool comes back). Run inside the serpentx-dev image. GPLv3.
+# pool comes back). Run inside the dualpool-dev image. GPLv3.
 set -u
 cd "$(dirname "$0")/../.."
 ROOT=.
@@ -11,8 +11,8 @@ LOG=/tmp/sx_fo.log
 PORT=3334
 
 echo "== compiling splitter =="
-make serpentx-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
-cp serpentx-splitter "$BIN"
+make dualpool-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
+cp dualpool-splitter "$BIN"
 
 cd test/integration
 python3 fake_upstream.py --port 4001 --tag A --log /dev/null >/dev/null 2>&1 & UPA=$!

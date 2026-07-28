@@ -1,7 +1,7 @@
 /*
  * share_accounting.h — difficulty-weighted per-pool share accounting.
  *
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3 (derivative of ckpool).
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3 (derivative of ckpool).
  * Copyright (C) 2025-2026 The SerpentX authors.
  *
  * This is the PURE accounting core: it consumes already-decoded Stratum events
@@ -15,8 +15,8 @@
  * the session difficulty in force at the moment it was SUBMITTED, correlated to
  * its result by JSON-RPC id, and tallied to the pool the session is pinned to.
  */
-#ifndef SERPENTX_SHARE_ACCOUNTING_H
-#define SERPENTX_SHARE_ACCOUNTING_H
+#ifndef DUALPOOL_SHARE_ACCOUNTING_H
+#define DUALPOOL_SHARE_ACCOUNTING_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -62,4 +62,4 @@ void share_session_on_submit(share_session_t *s, long id);
 void share_session_on_result(share_session_t *s, long id, bool accepted,
                              share_totals_t *t);
 
-#endif /* SERPENTX_SHARE_ACCOUNTING_H */
+#endif /* DUALPOOL_SHARE_ACCOUNTING_H */

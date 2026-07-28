@@ -1,13 +1,13 @@
-# SerpentX — production run. Point your miners at this host's port 3333 and open
+# Dual-Pool Proxy — production run. Point your miners at this host's port 3333 and open
 # the dashboard on :8080. Configure EITHER by dropping a config.json in ./config/
 # OR by filling in .env (copy .env.example -> .env). GPLv3.
-name: serpentx
+name: dualpool-proxy
 
 services:
-  serpentx:
+  dualpool-proxy:
     build: .
-    image: serpentx
-    container_name: serpentx
+    image: dualpool-proxy
+    container_name: dualpool-proxy
     restart: unless-stopped
     ports:
       - "3333:3333"    # miners point here (stratum+tcp://<host>:3333)

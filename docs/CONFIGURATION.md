@@ -1,6 +1,6 @@
 # Configuration & Optimization
 
-SerpentX is configured either by a **`config.json`** (mounted at `/config/`) or by
+Dual-Pool Proxy is configured either by a **`config.json`** (mounted at `/config/`) or by
 **environment variables** (`.env`, used only when no `config.json` is present).
 This page documents every option and how to tune it.
 
@@ -57,7 +57,7 @@ miner's real hashrate (not by miner count). Examples:
 - `ratio_a: 100` → everything to A (B is a hot standby via failover/donation).
 - `ratio_a: 0` → everything to B.
 
-**Small-fleet reality:** with only 1–3 miners the split is *coarse* — SerpentX
+**Small-fleet reality:** with only 1–3 miners the split is *coarse* — Dual-Pool Proxy
 can't split a single miner in `farm_split` mode (one miner = one pool for its
 session). Options:
 - Run **2+ miners** so the weighted split can approximate your ratio.
@@ -102,9 +102,9 @@ Add a `failover` block to a pool and its `ckproxy` will automatically switch to
 the backup upstream if the primary dies — independently for each pool. This is
 **inside** one pool (primary → backup).
 
-Separately, SerpentX does **pool-level failover**: if a whole pool (both its
+Separately, Dual-Pool Proxy does **pool-level failover**: if a whole pool (both its
 endpoints) becomes unreachable — or stops sending work for 90s while it has
-miners — SerpentX stops sending it new miners, **evicts** its current miners so
+miners — Dual-Pool Proxy stops sending it new miners, **evicts** its current miners so
 they reconnect onto the surviving pool (**donation**), and automatically returns
 traffic when the pool recovers. Nothing to configure; it's always on.
 
@@ -120,11 +120,11 @@ traffic when the pool recovers. Nothing to configure; it's always on.
 - **REST:** `GET /api/status` (JSON), `POST /api/config`
   (`{ratio_a, mode, interval_ms, pools:[{url,user,pass}]}` — any subset).
 - **Prometheus:** `GET /metrics` — import
-  [`grafana/serpentx-dashboard.json`](../grafana/serpentx-dashboard.json).
+  [`grafana/dualpool-dashboard.json`](../grafana/dualpool-dashboard.json).
 - **Password:** set `web_password` (or `WEB_PASSWORD`). Then `/api/*` and
-  `/metrics` require it as header `X-SerpentX-Key: <pw>` or `?key=<pw>`. The
+  `/metrics` require it as header `X-DualPool-Key: <pw>` or `?key=<pw>`. The
   dashboard prompts once and remembers it. Static files stay open. It's a simple
-  LAN guard, not a hardened auth system — don't expose SerpentX to the public
+  LAN guard, not a hardened auth system — don't expose Dual-Pool Proxy to the public
   internet.
 
 ## Which file is the "live" config? (`config.json` vs `.env`)
@@ -144,9 +144,9 @@ dashboard edits). For day-to-day changes, use the dashboard or edit `config.json
 ## Applying changes
 
 - **Ratio / mode** → apply **instantly** from the dashboard (or `docker kill -s
-  HUP serpentx` after editing `config.json`), without dropping miners.
+  HUP dualpool-proxy` after editing `config.json`), without dropping miners.
 - **Pool URLs / usernames / passwords** → saved immediately, take effect on
-  `docker compose restart serpentx` (a pool swap reconnects the miners on it).
+  `docker compose restart dualpool-proxy` (a pool swap reconnects the miners on it).
 
 ## Optimization checklist
 

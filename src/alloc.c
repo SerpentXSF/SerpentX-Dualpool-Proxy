@@ -1,6 +1,6 @@
 /*
  * alloc.c — hashrate-weighted pool allocator. See alloc.h.
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3.
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3.
  * Copyright (C) 2025-2026 The SerpentX authors.
  */
 #include "alloc.h"

@@ -12,6 +12,6 @@ test/host/test_alloc
 test/host/test_share
 test/host/test_config
 test/host/test_health
-serpentx-splitter
+dualpool-splitter
 *.o
 *.md

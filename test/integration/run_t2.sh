@@ -6,8 +6,8 @@
 set -u
 cd "$(dirname "$0")"
 ROOT=../..
-LOG=/tmp/serpentx_t2.log
-BIN=/tmp/serpentx_splitter
+LOG=/tmp/dualpool_t2.log
+BIN=/tmp/dualpool_splitter
 RATIO=70
 N=40
 SHARES=3
@@ -16,10 +16,10 @@ TOL=4          # +/- connections tolerance around the target
 : > "$LOG"
 
 echo "== compiling splitter =="
-make -C "$ROOT" serpentx-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
-cp "$ROOT/serpentx-splitter" "$BIN"
+make -C "$ROOT" dualpool-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
+cp "$ROOT/dualpool-splitter" "$BIN"
 
-SPLOG=/tmp/serpentx_t2_sp.log
+SPLOG=/tmp/dualpool_t2_sp.log
 python3 fake_upstream.py --port 4001 --tag A --log "$LOG" & UPA=$!
 python3 fake_upstream.py --port 4002 --tag B --log "$LOG" & UPB=$!
 sleep 0.6

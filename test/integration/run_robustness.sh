@@ -4,11 +4,11 @@
 #     count) — connected drops to 0 after miners leave, while routed stays > 0.
 #  B) a ckproxy that keeps dying is detected as crash-looping, respawns with
 #     exponential backoff, and its pool is marked down (donated away).
-# Runs in serpentx-dev. GPLv3.
+# Runs in dualpool-dev. GPLv3.
 set -u
 cd "$(dirname "$0")/../.."
-make serpentx-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
-cp serpentx-splitter /tmp/sx_rb
+make dualpool-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
+cp dualpool-splitter /tmp/sx_rb
 cd test/integration
 fail=0
 
@@ -24,7 +24,7 @@ sleep 2.5
 S=$(curl -s http://127.0.0.1:8097/api/status)
 CONN=$(echo "$S"    | python3 -c 'import sys,json;d=json.load(sys.stdin);print(sum(p["connected"] for p in d["pools"]))')
 ROUTED=$(echo "$S"  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(sum(p["routed"] for p in d["pools"]))')
-MET=$(curl -s http://127.0.0.1:8097/metrics | grep -c "serpentx_miners_connected_pool{")
+MET=$(curl -s http://127.0.0.1:8097/metrics | grep -c "dualpool_miners_connected_pool{")
 echo "   while connected: connected=$CONN routed=$ROUTED metrics_lines=$MET"
 sleep 5    # miners disconnect
 CONN2=$(curl -s http://127.0.0.1:8097/api/status | python3 -c 'import sys,json;d=json.load(sys.stdin);print(sum(p["connected"] for p in d["pools"]))')
@@ -45,7 +45,7 @@ cat > "$RUN/config.json" <<'EOF'
              {"url":"127.0.0.1:9902","user":"b","pass":"x","ckproxy_mode":"proxy"} ] }
 EOF
 # /bin/false exits immediately (like a ckproxy that can't log in) -> crash loop
-SERPENTX_CKPOOL_BIN=/bin/false SERPENTX_RUNDIR="$RUN/run" /tmp/sx_rb --config "$RUN/config.json" >/tmp/sx_rb_b.log 2>&1 & SPB=$!
+DUALPOOL_CKPOOL_BIN=/bin/false DUALPOOL_RUNDIR="$RUN/run" /tmp/sx_rb --config "$RUN/config.json" >/tmp/sx_rb_b.log 2>&1 & SPB=$!
 sleep 20
 CL=$(grep -c "crash-looping" /tmp/sx_rb_b.log)
 BK=$(grep -oE "respawn in [0-9]+s" /tmp/sx_rb_b.log | grep -oE "[0-9]+" | sort -n | tail -1)

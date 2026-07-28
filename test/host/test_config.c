@@ -1,6 +1,6 @@
 /*
- * test_config.c — SerpentX tests for JSON config parsing (our config) and
- * ckproxy config emission. Requires jansson (run in the serpentx-dev image).
+ * test_config.c — Dual-Pool Proxy tests for JSON config parsing (our config) and
+ * ckproxy config emission. Requires jansson (run in the dualpool-dev image).
  * GPLv3.
  */
 #include <assert.h>
@@ -24,7 +24,7 @@ static const char *FULL =
 "}";
 
 static void test_parse_full(void) {
-    serpentx_config_t c;
+    dualpool_config_t c;
     char err[256];
     assert(config_parse_string(FULL, &c, err, sizeof(err)) == 0);
     assert(c.stratum_port == 3333);
@@ -49,7 +49,7 @@ static void test_defaults(void) {
         "{ \"ratio_a\": 50, \"pools\": ["
         "  { \"url\": \"a:1\", \"user\": \"ua\", \"pass\": \"pa\" },"
         "  { \"url\": \"b:2\", \"user\": \"ub\", \"pass\": \"pb\" } ] }";
-    serpentx_config_t c; char err[256];
+    dualpool_config_t c; char err[256];
     assert(config_parse_string(min, &c, err, sizeof(err)) == 0);
     assert(c.stratum_port == 3333);          /* default */
     assert(c.web_port == 8080);              /* default */
@@ -64,7 +64,7 @@ static void test_ratio_clamped(void) {
         "{ \"ratio_a\": 150, \"pools\": ["
         "  {\"url\":\"a:1\",\"user\":\"u\",\"pass\":\"p\"},"
         "  {\"url\":\"b:2\",\"user\":\"u\",\"pass\":\"p\"} ] }";
-    serpentx_config_t c; char err[256];
+    dualpool_config_t c; char err[256];
     assert(config_parse_string(j, &c, err, sizeof(err)) == 0);
     assert(c.ratio_a == 100);
 }
@@ -73,17 +73,17 @@ static void test_ratio_clamped(void) {
 static void test_requires_two_pools(void) {
     const char *j =
         "{ \"ratio_a\": 50, \"pools\": [ {\"url\":\"a:1\",\"user\":\"u\",\"pass\":\"p\"} ] }";
-    serpentx_config_t c; char err[256];
+    dualpool_config_t c; char err[256];
     assert(config_parse_string(j, &c, err, sizeof(err)) != 0);
 }
 
 /* ckproxy_config emits a valid ckpool proxy config with primary+failover in the
  * proxy array and the local serverurl the splitter will connect to. */
 static void test_ckproxy_emit(void) {
-    serpentx_config_t c; char err[256];
+    dualpool_config_t c; char err[256];
     assert(config_parse_string(FULL, &c, err, sizeof(err)) == 0);
 
-    char path[] = "/tmp/serpentx_ckproxyA.json";
+    char path[] = "/tmp/dualpool_ckproxyA.json";
     assert(ckproxy_config_write(&c.pools[0], 4001, "/tmp/sockA", path,
                                 err, sizeof(err)) == 0);
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SerpentX — Dual-Pool Stratum Proxy</title>
+<title>Dual-Pool Proxy — by SerpentX</title>
 <link rel="icon" type="image/png" href="serpentx-favicon.png">
 <link rel="apple-touch-icon" href="serpentx-favicon.png">
 <style>
@@ -41,9 +41,11 @@
       #8B5A1F 53%,#6b4013 100%);
     -webkit-background-clip:text;background-clip:text;color:transparent;
     filter:drop-shadow(0 2px 0 #0006)}
-  .tag{color:var(--muted);font-size:13px;margin-top:4px;letter-spacing:.14em;
+  .product{color:var(--txt);font:800 24px/1 ui-sans-serif,system-ui,sans-serif;
+    letter-spacing:.02em}
+  .tag{color:var(--muted);font-size:12px;margin-top:5px;letter-spacing:.12em;
     text-transform:uppercase}
-  .brandcol{display:flex;flex-direction:column}
+  .brandcol{display:flex;flex-direction:column;justify-content:center}
   .status-pill{margin-left:auto;z-index:2;display:flex;align-items:center;gap:8px;
     background:var(--bg-3);border:1px solid var(--line);border-radius:999px;
     padding:6px 14px;font-size:13px}
@@ -131,13 +133,14 @@
 <header>
   <img class="mech" src="serpentx-mech.png" alt="" onerror="this.style.display='none'">
   <div class="hero">
-    <!-- Header logo: the crest emblem (contains the SERPENTX word). Falls back
-         to the CSS wordmark if serpentx-emblem.png is absent. -->
-    <img class="emblem" id="emblem" src="serpentx-emblem.png" alt="SerpentX"
+    <!-- Maker's mark: the SerpentX crest (falls back to the CSS wordmark if
+         serpentx-emblem.png is absent). The product is "Dual-Pool Proxy". -->
+    <img class="emblem" id="emblem" src="serpentx-emblem.png" alt="by SerpentX"
          onload="this.style.display='block';document.getElementById('wm').style.display='none'">
     <div class="wordmark" id="wm">SERPENTX</div>
-    <div class="brandcol" style="margin-left:4px">
-      <div class="tag">Dual-Pool Stratum Proxy</div>
+    <div class="brandcol" style="margin-left:6px">
+      <div class="product">Dual-Pool Proxy</div>
+      <div class="tag">by SerpentX · stratum dual-pool splitter</div>
     </div>
     <div class="status-pill"><span class="dot" id="svcDot"></span>
       <span id="svcTxt">Proxy online</span></div>
@@ -229,7 +232,7 @@
   </div>
 
   <footer>
-    SerpentX <span id="footVer">X.1</span> · GPLv3 · built on
+    Dual-Pool Proxy <span id="footVer">X.2.5</span> · by SerpentX · GPLv3 · built on
     <a href="https://github.com/ckolivas/ckpool">ckpool / ckproxy</a>.
     Point miners at <code class="mono" id="footPort">stratum+tcp://this-host:3333</code>.
   </footer>
@@ -238,15 +241,15 @@
 <script>
 // ---- demo fallback data (used when /api/status is unreachable) ----
 const DEMO = {
-  version:"X.1",
+  version:"X.2.5",
   service:{online:true, stratum_port:3333},
   ratio_a:70, mode:"farm_split", interval_ms:180000,
   actual:{a:66.7, b:33.3},
   pools:[
     {id:"A", name:"Pool A", state:"on", url:"solo.ckpool.org:3333",
-     user:"bc1qexampleA.serpentx", connected:2, accepted:1841, rejected:7},
+     user:"bc1qexampleA.dualpool", connected:2, accepted:1841, rejected:7},
     {id:"B", name:"Pool B", state:"on", url:"pool.example.com:3333",
-     user:"bc1qexampleB.serpentx", connected:1, accepted:930, rejected:3}
+     user:"bc1qexampleB.dualpool", connected:1, accepted:930, rejected:3}
   ],
   miners:[
     {worker:"bitaxe-01", pool:"A", hashrate:"512 GH/s", accepted:1120, rejected:4, since:"2h 14m"},
@@ -316,15 +319,15 @@ function onMode(){document.getElementById('intervalWrap').style.display=
 
 // Optional dashboard key (only needed if the proxy was started with web_password).
 function authHeaders(){
-  const k=localStorage.getItem('serpentx_key');
-  return k ? {'X-SerpentX-Key':k} : {};
+  const k=localStorage.getItem('dualpool_key');
+  return k ? {'X-DualPool-Key':k} : {};
 }
 async function loadStatus(){
   try{
     let r=await fetch('/api/status',{cache:'no-store',headers:authHeaders()});
     if(r.status===401){
       const k=prompt('Dashboard key:');
-      if(k){ localStorage.setItem('serpentx_key',k);
+      if(k){ localStorage.setItem('dualpool_key',k);
         r=await fetch('/api/status',{cache:'no-store',headers:authHeaders()}); }
     }
     if(!r.ok) throw 0;

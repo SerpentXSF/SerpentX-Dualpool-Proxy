@@ -7,7 +7,7 @@
 ckproxy*.json
 
 # build artifacts
-serpentx-splitter
+dualpool-splitter
 test/host/test_dual_pool
 test/host/test_alloc
 test/host/test_share

@@ -1,5 +1,5 @@
 {
-  "_comment": "SerpentX 'sovereign' preset: decentralize with your OWN node. Pool A = OCEAN via a local DATUM Gateway (TIDES payouts, your node builds the block templates, non-custodial). Pool B = your self-hosted solo pool (public-pool) for the lottery leg. Both are local Stratum V1 endpoints, so SerpentX talks to them with zero extra config. See docs/STRATEGIES.md. Replace the addresses/hosts with yours.",
+  "_comment": "Dual-Pool Proxy 'sovereign' preset: decentralize with your OWN node. Pool A = OCEAN via a local DATUM Gateway (TIDES payouts, your node builds the block templates, non-custodial). Pool B = your self-hosted solo pool (public-pool) for the lottery leg. Both are local Stratum V1 endpoints, so Dual-Pool Proxy talks to them with zero extra config. See docs/STRATEGIES.md. Replace the addresses/hosts with yours.",
 
   "downstream": { "stratum_port": 3333, "web_port": 8080 },
   "mode": "farm_split",

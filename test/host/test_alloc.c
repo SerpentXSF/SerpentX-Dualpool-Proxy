@@ -1,5 +1,5 @@
 /*
- * test_alloc.c — SerpentX host tests for the hashrate-weighted allocator.
+ * test_alloc.c — Dual-Pool Proxy host tests for the hashrate-weighted allocator.
  * GPLv3.
  *
  * The whole point of this module: with mixed hardware, splitting by CONNECTION

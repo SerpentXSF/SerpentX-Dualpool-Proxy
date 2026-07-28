@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal fake Stratum miner for SerpentX T2 tests. Connects, subscribes,
+"""Minimal fake Stratum miner for Dual-Pool Proxy T2 tests. Connects, subscribes,
 authorizes, and submits N shares. GPLv3.
 
     fake_miner.py <host> <port> <n_shares>
@@ -26,7 +26,7 @@ def main():
             return b""
 
     # subscribe: the reply comes from ckproxy (proving splitter->ckproxy plumbing).
-    send({"id": 1, "method": "mining.subscribe", "params": ["serpentx-fake/1.0"]})
+    send({"id": 1, "method": "mining.subscribe", "params": ["dualpool-fake/1.0"]})
     line = recv()
     try:
         msg = json.loads(line.decode().strip())

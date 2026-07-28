@@ -1,6 +1,6 @@
 /*
- * splitter.c — SerpentX farm-split proxy front-end (minimal, CLI-configured).
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3.
+ * splitter.c — Dual-Pool Proxy farm-split proxy front-end (minimal, CLI-configured).
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3.
  * Copyright (C) 2025-2026 The SerpentX authors.
  *
  * This is the connection router: it listens for miners, assigns each to pool A
@@ -60,8 +60,8 @@ static long             g_slice_n      = 0;
 static share_totals_t g_totals;
 static pthread_mutex_t g_totals_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned long   g_routed[2];              /* miners routed per pool */
-static serpentx_config_t g_cfg;                  /* current config snapshot */
-static char g_webroot[512] = "/usr/local/share/serpentx/web";
+static dualpool_config_t g_cfg;                  /* current config snapshot */
+static char g_webroot[512] = "/usr/local/share/dualpool/web";
 static char g_config_path[512] = "";             /* set in config mode */
 static int64_t g_last_notify_us[2];              /* job-flow liveness per pool */
 static volatile sig_atomic_t g_reload = 0;       /* SIGHUP -> reload config */
@@ -132,7 +132,7 @@ static void evict_pool(pool_id_t pool)
         }
     }
     pthread_mutex_unlock(&g_conns_lock);
-    if (n) fprintf(stderr, "serpentx: pool %c down -> evicted %d miner(s)\n",
+    if (n) fprintf(stderr, "dualpool: pool %c down -> evicted %d miner(s)\n",
                    (pool == POOL_A) ? 'A' : 'B', n);
 }
 
@@ -168,7 +168,7 @@ static void *timeslice_thread(void *arg)
         usleep((useconds_t)g_interval_ms * 1000);
         timeslice_advance();
         evict_all();   /* recycle connections onto the new slice's pool */
-        fprintf(stderr, "serpentx: time-slice boundary -> pool %c\n",
+        fprintf(stderr, "dualpool: time-slice boundary -> pool %c\n",
                 (g_current_pool == POOL_A) ? 'A' : 'B');
     }
     return NULL;
@@ -184,7 +184,7 @@ static void setup_timeslice(int ratio, int interval_ms)
     pthread_t t;
     pthread_create(&t, NULL, timeslice_thread, NULL);
     pthread_detach(t);
-    fprintf(stderr, "serpentx: TIME-SLICE interval=%dms ratio A=%d%% (single-miner mode)\n",
+    fprintf(stderr, "dualpool: TIME-SLICE interval=%dms ratio A=%d%% (single-miner mode)\n",
             interval_ms, ratio);
 }
 
@@ -356,10 +356,10 @@ static void persist_config(void)
 static void reload_config(void)
 {
     if (!g_config_path[0]) return;
-    serpentx_config_t c;
+    dualpool_config_t c;
     char err[256];
     if (config_parse_file(g_config_path, &c, err, sizeof(err)) != 0) {
-        fprintf(stderr, "serpentx: reload failed: %s\n", err);
+        fprintf(stderr, "dualpool: reload failed: %s\n", err);
         return;
     }
     pthread_mutex_lock(&g_alloc_lock);
@@ -368,7 +368,7 @@ static void reload_config(void)
     snprintf(g_cfg.mode, sizeof(g_cfg.mode), "%s", c.mode);
     g_cfg.interval_ms = c.interval_ms;
     pthread_mutex_unlock(&g_alloc_lock);
-    fprintf(stderr, "serpentx: config reloaded (ratio A=%d%% mode=%s)\n",
+    fprintf(stderr, "dualpool: config reloaded (ratio A=%d%% mode=%s)\n",
             c.ratio_a, c.mode);
 }
 
@@ -400,7 +400,7 @@ static void *probe_thread(void *arg)
                 mono_us() - g_pool_last_exit_us[i] > 30LL * 1000000) {
                 g_pool_crashloop[i] = 0;
                 g_pool_fail_streak[i] = 0;
-                fprintf(stderr, "serpentx: pool %c ckproxy stable again\n", 'A' + i);
+                fprintf(stderr, "dualpool: pool %c ckproxy stable again\n", 'A' + i);
             }
 
             bool ok = reachable && !stale && !g_pool_crashloop[i];
@@ -413,11 +413,11 @@ static void *probe_thread(void *arg)
             pthread_mutex_unlock(&g_alloc_lock);
 
             if (was_up && !now_up)
-                fprintf(stderr, "serpentx: pool %c down (%s)\n", 'A' + i,
+                fprintf(stderr, "dualpool: pool %c down (%s)\n", 'A' + i,
                         stale ? "no work" : "unreachable");
             if (was_up && !now_up) evict_pool(i);
             else if (!was_up && now_up)
-                fprintf(stderr, "serpentx: pool %c recovered\n", 'A' + i);
+                fprintf(stderr, "dualpool: pool %c recovered\n", 'A' + i);
         }
         usleep(3 * 1000 * 1000);   /* 3s between probe rounds */
     }
@@ -458,7 +458,7 @@ static char *build_status_json(void)
     int  ratio = g_alloc.ratio_a;
     bool up[2] = { health_pool_up(&g_health, POOL_A), health_pool_up(&g_health, POOL_B) };
     unsigned long r[2] = { g_routed[0], g_routed[1] };
-    serpentx_config_t cfg = g_cfg;   /* snapshot: pools can change concurrently */
+    dualpool_config_t cfg = g_cfg;   /* snapshot: pools can change concurrently */
     pthread_mutex_unlock(&g_alloc_lock);
 
     pthread_mutex_lock(&g_totals_lock);
@@ -473,7 +473,7 @@ static char *build_status_json(void)
     json_object_set_new(svc, "online", json_true());
     json_object_set_new(svc, "stratum_port", json_integer(cfg.stratum_port));
     json_object_set_new(root, "service", svc);
-    json_object_set_new(root, "version", json_string(SERPENTX_VERSION));
+    json_object_set_new(root, "version", json_string(DUALPOOL_VERSION));
     json_object_set_new(root, "mode", json_string(cfg.mode));
     json_object_set_new(root, "ratio_a", json_integer(ratio));
     json_object_set_new(root, "interval_ms", json_integer(cfg.interval_ms));
@@ -585,7 +585,7 @@ static int apply_config_json(const char *body)
 
     json_decref(m);
     persist_config();   /* write full config to disk */
-    fprintf(stderr, "serpentx: config saved (ratio A=%d%% mode=%s); "
+    fprintf(stderr, "dualpool: config saved (ratio A=%d%% mode=%s); "
                     "pool/credential changes take effect on restart\n",
             g_cfg.ratio_a, g_cfg.mode);
     return 0;
@@ -616,39 +616,39 @@ static char *build_metrics(void)
     const char *nm[2] = { "A", "B" };
     int n = 0;
     n += snprintf(buf + n, 4096 - n,
-        "# HELP serpentx_ratio_target_percent Target Pool A share.\n"
-        "# TYPE serpentx_ratio_target_percent gauge\n"
-        "serpentx_ratio_target_percent %d\n"
-        "# HELP serpentx_miners_connected Currently connected miners.\n"
-        "# TYPE serpentx_miners_connected gauge\n"
-        "serpentx_miners_connected %d\n"
-        "# HELP serpentx_pool_up Pool reachable (1) or down (0).\n"
-        "# TYPE serpentx_pool_up gauge\n"
-        "# HELP serpentx_routed_total Miners routed to a pool since start (cumulative).\n"
-        "# TYPE serpentx_routed_total counter\n"
-        "# HELP serpentx_miners_connected_pool Currently connected miners per pool.\n"
-        "# TYPE serpentx_miners_connected_pool gauge\n"
-        "# HELP serpentx_actual_percent Realized share of currently-connected miners.\n"
-        "# TYPE serpentx_actual_percent gauge\n"
-        "# HELP serpentx_shares_accepted_total Accepted shares per pool.\n"
-        "# TYPE serpentx_shares_accepted_total counter\n"
-        "# HELP serpentx_shares_rejected_total Rejected shares per pool.\n"
-        "# TYPE serpentx_shares_rejected_total counter\n"
-        "# HELP serpentx_shares_accepted_difficulty_total Difficulty-weighted accepted.\n"
-        "# TYPE serpentx_shares_accepted_difficulty_total counter\n"
-        "# HELP serpentx_build_info Build/version info.\n"
-        "# TYPE serpentx_build_info gauge\n"
-        "serpentx_build_info{version=\"" SERPENTX_VERSION "\"} 1\n",
+        "# HELP dualpool_ratio_target_percent Target Pool A share.\n"
+        "# TYPE dualpool_ratio_target_percent gauge\n"
+        "dualpool_ratio_target_percent %d\n"
+        "# HELP dualpool_miners_connected Currently connected miners.\n"
+        "# TYPE dualpool_miners_connected gauge\n"
+        "dualpool_miners_connected %d\n"
+        "# HELP dualpool_pool_up Pool reachable (1) or down (0).\n"
+        "# TYPE dualpool_pool_up gauge\n"
+        "# HELP dualpool_routed_total Miners routed to a pool since start (cumulative).\n"
+        "# TYPE dualpool_routed_total counter\n"
+        "# HELP dualpool_miners_connected_pool Currently connected miners per pool.\n"
+        "# TYPE dualpool_miners_connected_pool gauge\n"
+        "# HELP dualpool_actual_percent Realized share of currently-connected miners.\n"
+        "# TYPE dualpool_actual_percent gauge\n"
+        "# HELP dualpool_shares_accepted_total Accepted shares per pool.\n"
+        "# TYPE dualpool_shares_accepted_total counter\n"
+        "# HELP dualpool_shares_rejected_total Rejected shares per pool.\n"
+        "# TYPE dualpool_shares_rejected_total counter\n"
+        "# HELP dualpool_shares_accepted_difficulty_total Difficulty-weighted accepted.\n"
+        "# TYPE dualpool_shares_accepted_difficulty_total counter\n"
+        "# HELP dualpool_build_info Build/version info.\n"
+        "# TYPE dualpool_build_info gauge\n"
+        "dualpool_build_info{version=\"" DUALPOOL_VERSION "\"} 1\n",
         ratio, miners);
     for (int i = 0; i < 2; i++) {
         n += snprintf(buf + n, 4096 - n,
-            "serpentx_pool_up{pool=\"%s\"} %d\n"
-            "serpentx_routed_total{pool=\"%s\"} %lu\n"
-            "serpentx_miners_connected_pool{pool=\"%s\"} %d\n"
-            "serpentx_actual_percent{pool=\"%s\"} %.1f\n"
-            "serpentx_shares_accepted_total{pool=\"%s\"} %llu\n"
-            "serpentx_shares_rejected_total{pool=\"%s\"} %llu\n"
-            "serpentx_shares_accepted_difficulty_total{pool=\"%s\"} %.0f\n",
+            "dualpool_pool_up{pool=\"%s\"} %d\n"
+            "dualpool_routed_total{pool=\"%s\"} %lu\n"
+            "dualpool_miners_connected_pool{pool=\"%s\"} %d\n"
+            "dualpool_actual_percent{pool=\"%s\"} %.1f\n"
+            "dualpool_shares_accepted_total{pool=\"%s\"} %llu\n"
+            "dualpool_shares_rejected_total{pool=\"%s\"} %llu\n"
+            "dualpool_shares_accepted_difficulty_total{pool=\"%s\"} %.0f\n",
             nm[i], up[i], nm[i], r[i], nm[i], connected[i], nm[i], act[i],
             nm[i], (unsigned long long)t.accepted_n[i],
             nm[i], (unsigned long long)t.rejected_n[i],
@@ -659,7 +659,7 @@ static char *build_metrics(void)
 
 static void webui_boot(int web_port)
 {
-    const char *wr = getenv("SERPENTX_WEBROOT");
+    const char *wr = getenv("DUALPOOL_WEBROOT");
     if (wr) snprintf(g_webroot, sizeof(g_webroot), "%s", wr);
     if (web_port > 0)
         webui_start(web_port, g_webroot, build_status_json, apply_config_json,
@@ -671,7 +671,7 @@ static int run_accept_loop(int listen_port)
 {
     int lfd = make_listener(listen_port);
     if (lfd < 0) { perror("listen"); return 1; }
-    fprintf(stderr, "SerpentX splitter: listening :%d  A=%s:%s  B=%s:%s\n",
+    fprintf(stderr, "Dual-Pool Proxy splitter: listening :%d  A=%s:%s  B=%s:%s\n",
             listen_port, g_pool_host[POOL_A], g_pool_port[POOL_A],
             g_pool_host[POOL_B], g_pool_port[POOL_B]);
 
@@ -688,7 +688,7 @@ static int run_accept_loop(int listen_port)
         pool_id_t pool;
         int up = open_upstream(&pool);
         if (up < 0) { close(down); continue; }   /* both pools down */
-        fprintf(stderr, "serpentx: route -> %c\n", (pool == POOL_A) ? 'A' : 'B');
+        fprintf(stderr, "dualpool: route -> %c\n", (pool == POOL_A) ? 'A' : 'B');
 
         pthread_mutex_lock(&g_alloc_lock);
         g_routed[pool]++;
@@ -769,7 +769,7 @@ static void *monitor_thread(void *arg)
 
             if (g_pool_fail_streak[i] >= 3 && !g_pool_crashloop[i]) {
                 g_pool_crashloop[i] = 1;
-                fprintf(stderr, "serpentx: ckproxy %s crash-looping (x%d) — pool marked "
+                fprintf(stderr, "dualpool: ckproxy %s crash-looping (x%d) — pool marked "
                         "DOWN, donating to the other pool. Check %s/console.log "
                         "(often an upstream 'Invalid login').\n",
                         g_ck[i].name, g_pool_fail_streak[i], g_ck[i].sock);
@@ -778,7 +778,7 @@ static void *monitor_thread(void *arg)
             int shift = g_pool_fail_streak[i] > 5 ? 5 : g_pool_fail_streak[i];
             unsigned backoff = 1u << shift;          /* 1,2,4,8,16,32 s */
             if (backoff > 30) backoff = 30;
-            fprintf(stderr, "serpentx: ckproxy %s exited; respawn in %us\n",
+            fprintf(stderr, "dualpool: ckproxy %s exited; respawn in %us\n",
                     g_ck[i].name, backoff);
             sleep(backoff);
             spawn_one(&g_ck[i]);
@@ -789,23 +789,23 @@ static void *monitor_thread(void *arg)
 
 static int run_config_mode(const char *path)
 {
-    serpentx_config_t cfg;
+    dualpool_config_t cfg;
     char err[256];
     if (config_parse_file(path, &cfg, err, sizeof(err)) != 0) {
-        fprintf(stderr, "serpentx: config error: %s\n", err);
+        fprintf(stderr, "dualpool: config error: %s\n", err);
         return 1;
     }
     g_cfg = cfg;   /* snapshot for the dashboard */
     snprintf(g_config_path, sizeof(g_config_path), "%s", path);   /* for persist/reload */
 
-    const char *ckbin = getenv("SERPENTX_CKPOOL_BIN");
+    const char *ckbin = getenv("DUALPOOL_CKPOOL_BIN");
     if (!ckbin) ckbin = "/usr/local/bin/ckpool";
-    const char *base = getenv("SERPENTX_RUNDIR");
-    if (!base) base = "/tmp/serpentx";
+    const char *base = getenv("DUALPOOL_RUNDIR");
+    if (!base) base = "/tmp/dualpool";
     ensure_dir(base);
 
     const int local_port[2] = { 4001, 4002 };
-    const char *nm[2] = { "serpentxA", "serpentxB" };
+    const char *nm[2] = { "dualpoolA", "dualpoolB" };
 
     for (int i = 0; i < 2; i++) {
         ckproxy_proc_t *p = &g_ck[i];
@@ -817,11 +817,11 @@ static int run_config_mode(const char *path)
         ensure_dir(p->sock);
         if (ckproxy_config_write(p->pool, local_port[i], p->sock, p->cfg,
                                  err, sizeof(err)) != 0) {
-            fprintf(stderr, "serpentx: %s\n", err);
+            fprintf(stderr, "dualpool: %s\n", err);
             return 1;
         }
         spawn_one(p);
-        if (p->pid < 0) { fprintf(stderr, "serpentx: spawn %s failed\n", nm[i]); return 1; }
+        if (p->pid < 0) { fprintf(stderr, "dualpool: spawn %s failed\n", nm[i]); return 1; }
 
         /* set the upstream the splitter connects to */
         char portbuf[16];
@@ -833,7 +833,7 @@ static int run_config_mode(const char *path)
     /* Bring up the allocator + dashboard immediately so the UI is reachable
      * during startup (before the ckproxies finish connecting upstream). */
     alloc_init(&g_alloc, (uint8_t)cfg.ratio_a);
-    fprintf(stderr, "serpentx: mode=%s ratio A=%d%%\n", cfg.mode, cfg.ratio_a);
+    fprintf(stderr, "dualpool: mode=%s ratio A=%d%%\n", cfg.mode, cfg.ratio_a);
     if (!strcmp(cfg.mode, "time_slice"))
         setup_timeslice(cfg.ratio_a, cfg.interval_ms);
     webui_boot(cfg.web_port);
@@ -845,9 +845,9 @@ static int run_config_mode(const char *path)
     /* wait for each ckproxy to start listening */
     for (int i = 0; i < 2; i++) {
         if (wait_port(g_pool_host[i], g_pool_port[i], 20000) != 0)
-            fprintf(stderr, "serpentx: warning: ckproxy %s not listening yet\n", nm[i]);
+            fprintf(stderr, "dualpool: warning: ckproxy %s not listening yet\n", nm[i]);
         else
-            fprintf(stderr, "serpentx: ckproxy %s up on %s\n", nm[i], g_pool_port[i]);
+            fprintf(stderr, "dualpool: ckproxy %s up on %s\n", nm[i], g_pool_port[i]);
     }
 
     return run_accept_loop(cfg.stratum_port);
@@ -884,7 +884,7 @@ static int run_cli_mode(int listen_port, int ratio, char *a_arg, char *b_arg,
 
 int main(int argc, char **argv)
 {
-    fprintf(stderr, "SerpentX %s — Dual-Pool Stratum Proxy\n", SERPENTX_VERSION);
+    fprintf(stderr, "Dual-Pool Proxy %s — Dual-Pool Stratum Proxy\n", DUALPOOL_VERSION);
     signal(SIGPIPE, SIG_IGN);
     signal(SIGHUP, sighup_handler);   /* reload config on SIGHUP */
     int listen_port = 3333, ratio = 50, web_port = 0, interval_ms = 180000;

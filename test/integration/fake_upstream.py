@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal fake Stratum upstream for SerpentX integration tests.
+"""Minimal fake Stratum upstream for Dual-Pool Proxy integration tests.
 
 Speaks just enough Stratum to let a miner subscribe/authorize/submit. Appends
 one line per event to stdout (and optionally a file) so runners can count them:

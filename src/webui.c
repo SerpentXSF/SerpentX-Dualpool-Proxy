@@ -1,6 +1,6 @@
 /*
  * webui.c — minimal embedded HTTP server. See webui.h.
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3.
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3.
  * Copyright (C) 2025-2026 The SerpentX authors.
  */
 #define _GNU_SOURCE
@@ -26,13 +26,13 @@ typedef struct {
 
 static webui_ctx_t g_web;
 
-/* Check the request for the shared key (header X-SerpentX-Key or ?key=). Returns
+/* Check the request for the shared key (header X-DualPool-Key or ?key=). Returns
  * 1 if auth passes (or no password configured), 0 otherwise. */
 static int authorized(const char *req, const char *path)
 {
     if (g_web.password[0] == '\0') return 1;   /* auth disabled */
 
-    const char *h = strcasestr(req, "X-SerpentX-Key:");
+    const char *h = strcasestr(req, "X-DualPool-Key:");
     if (h) {
         h += 15;
         while (*h == ' ') h++;
@@ -190,11 +190,11 @@ static void *listen_thread(void *arg)
     a.sin_addr.s_addr = htonl(INADDR_ANY);
     a.sin_port = htons((uint16_t)g_web.port);
     if (bind(lfd, (struct sockaddr *)&a, sizeof(a)) < 0) {
-        fprintf(stderr, "serpentx: web bind :%d failed\n", g_web.port);
+        fprintf(stderr, "dualpool: web bind :%d failed\n", g_web.port);
         close(lfd); return NULL;
     }
     listen(lfd, 64);
-    fprintf(stderr, "serpentx: dashboard on :%d (webroot %s)\n", g_web.port, g_web.webroot);
+    fprintf(stderr, "dualpool: dashboard on :%d (webroot %s)\n", g_web.port, g_web.webroot);
     for (;;) {
         int c = accept(lfd, NULL, NULL);
         if (c < 0) { if (errno == EINTR) continue; break; }

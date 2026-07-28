@@ -1,6 +1,6 @@
 /*
  * share_accounting.c — difficulty-weighted per-pool share accounting core.
- * See share_accounting.h. Part of SerpentX. GPLv3.
+ * See share_accounting.h. Part of Dual-Pool Proxy. GPLv3.
  * Copyright (C) 2025-2026 The SerpentX authors.
  */
 #include "share_accounting.h"

@@ -1,5 +1,5 @@
 /*
- * test_dual_pool.c — SerpentX host unit tests for the ported dual_pool math.
+ * test_dual_pool.c — Dual-Pool Proxy host unit tests for the ported dual_pool math.
  * GPLv3. Ported from the ESP32 dual_pool/test_host harness.
  */
 

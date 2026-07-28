@@ -1,5 +1,5 @@
 /*
- * test_share.c — SerpentX host tests for difficulty-weighted per-pool share
+ * test_share.c — Dual-Pool Proxy host tests for difficulty-weighted per-pool share
  * accounting. GPLv3.
  *
  * Raw accepted-share COUNTS are meaningless across two pools with different

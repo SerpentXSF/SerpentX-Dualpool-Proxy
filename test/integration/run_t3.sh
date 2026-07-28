@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# T3 full-stack test: real SerpentX container (splitter + two stock ckproxy)
+# T3 full-stack test: real Dual-Pool Proxy container (splitter + two stock ckproxy)
 # between fake miners and two fake upstreams. Verifies (1) both ckproxy come up,
 # (2) miners complete the Stratum handshake THROUGH splitter->ckproxy, and
 # (3) the splitter's farm-split routing matches --ratio. (Share PoW is ckpool's
@@ -16,8 +16,8 @@ cleanup() { $COMPOSE down -v >/dev/null 2>&1; }
 trap cleanup EXIT
 
 echo "== building images =="
-docker build -q -t serpentx . >/dev/null || { echo "FAIL: build serpentx"; exit 1; }
-docker build -q -f docker/Dockerfile.dev -t serpentx-dev . >/dev/null || { echo "FAIL: build dev"; exit 1; }
+docker build -q -t dualpool-proxy . >/dev/null || { echo "FAIL: build dualpool-proxy"; exit 1; }
+docker build -q -f docker/Dockerfile.dev -t dualpool-dev . >/dev/null || { echo "FAIL: build dev"; exit 1; }
 
 echo "== starting stack =="
 $COMPOSE up -d >/dev/null 2>&1 || { echo "FAIL: compose up"; exit 1; }
@@ -26,11 +26,11 @@ $COMPOSE up -d >/dev/null 2>&1 || { echo "FAIL: compose up"; exit 1; }
 # own chatty output is redirected to per-proxy console.log files).
 ready=0
 for _ in $(seq 1 30); do
-  n=$($COMPOSE logs serpentx 2>/dev/null | grep -c "up on")
+  n=$($COMPOSE logs dualpool-proxy 2>/dev/null | grep -c "up on")
   if [ "$n" -ge 2 ]; then ready=1; break; fi
   sleep 1
 done
-[ "$ready" -eq 1 ] || { echo "FAIL: ckproxy did not come up"; $COMPOSE logs serpentx | tail -20; exit 1; }
+[ "$ready" -eq 1 ] || { echo "FAIL: ckproxy did not come up"; $COMPOSE logs dualpool-proxy | tail -20; exit 1; }
 echo "   both ckproxy up"
 sleep 3   # let upstream generators settle
 
@@ -38,13 +38,13 @@ echo "== driving $N miners through the chain =="
 OUT=$($COMPOSE exec -T poolA bash -lc '
   ok=0
   for i in $(seq 1 '"$N"'); do
-    python3 /t/fake_miner.py serpentx 3333 3 "miner$i.$RANDOM" && ok=$((ok+1))
+    python3 /t/fake_miner.py dualpool-proxy 3333 3 "miner$i.$RANDOM" && ok=$((ok+1))
   done
   echo "MINER_OK=$ok"')
 MINER_OK=$(echo "$OUT" | grep -o 'MINER_OK=[0-9]*' | cut -d= -f2)
 
-RA=$($COMPOSE logs serpentx 2>/dev/null | grep -c "route -> A")
-RB=$($COMPOSE logs serpentx 2>/dev/null | grep -c "route -> B")
+RA=$($COMPOSE logs dualpool-proxy 2>/dev/null | grep -c "route -> A")
+RB=$($COMPOSE logs dualpool-proxy 2>/dev/null | grep -c "route -> B")
 TOTAL=$((RA + RB))
 EXP_A=$(( N * RATIO / 100 ))
 
@@ -69,5 +69,5 @@ if [ "$fail" -eq 0 ]; then
   echo "T3 PASS: real two-ckproxy container chain is up and farm-split ratio holds."
   exit 0
 else
-  echo "T3 FAILED"; $COMPOSE logs serpentx | tail -25; exit 1
+  echo "T3 FAILED"; $COMPOSE logs dualpool-proxy | tail -25; exit 1
 fi

@@ -15,7 +15,7 @@ with centralized hashrate. Tags: **[quick-win]** small, **[medium]** moderate,
 - **[quick-win] Sovereign preset, documented end-to-end** — a one-command compose
   that stands up Bitcoin node + [DATUM Gateway](https://github.com/OCEAN-xyz/datum_gateway)
   (OCEAN/TIDES) + [public-pool](https://github.com/benjamin-wilson/public-pool)
-  solo + SerpentX. (Preset config shipped; full compose stack is TODO.)
+  solo + Dual-Pool Proxy. (Preset config shipped; full compose stack is TODO.)
 - **[medium] Stratum V2 upstream via the [SRI translator](https://github.com/stratum-mining/stratum) sidecar** —
   let an SV2 **Job Declaration** pool be one of the two upstreams while miners stay
   on stock V1. Timely: the first production JD block was mined June 2026.
@@ -27,7 +27,7 @@ with centralized hashrate. Tags: **[quick-win]** small, **[medium]** moderate,
 - **[quick-win] Built-in split calculator** in the dashboard — given hashrate,
   network difficulty, and ratio, show steady sats/day, solo odds/year, and
   variance bands (simple Poisson math). Nobody ships this.
-- **[quick-win] "Trust but verify" panel** — SerpentX-counted shares vs
+- **[quick-win] "Trust but verify" panel** — Dual-Pool Proxy-counted shares vs
   pool-reported hashrate/shares, with drift alerts.
 - **[medium] Fee-aware ratio boost (opt-in, capped)** — raise the solo slice when
   projected next-block fees exceed a threshold (mempool.space API). Prize-size
@@ -38,8 +38,8 @@ with centralized hashrate. Tags: **[quick-win]** small, **[medium]** moderate,
 ## Ops & monitoring
 - **[medium] [pyasic](https://github.com/UpstreamData/pyasic) integration** — LAN
   miner discovery, per-device temp/power/**J/TH** next to per-device shares,
-  one-click repoint to SerpentX.
-- **[quick-win] Ship the Grafana dashboard** (done: `grafana/serpentx-dashboard.json`)
+  one-click repoint to Dual-Pool Proxy.
+- **[quick-win] Ship the Grafana dashboard** (done: `grafana/dualpool-dashboard.json`)
   and a measured overhead/stale-rate benchmark for launch credibility.
 - **[medium] Efficiency advisor** — combine power + shares into fleet J/TH and
   sats/kWh, linking out to BitAxe autotune/benchmark tools.

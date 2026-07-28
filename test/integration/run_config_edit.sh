@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Verify the dashboard's Save & apply writes the FULL config (ratio + pool fields)
 # back to config.json, and that a blank password keeps the current one. Runs in
-# serpentx-dev; a stub ckproxy (/bin/true) stands in since we only test the
+# dualpool-dev; a stub ckproxy (/bin/true) stands in since we only test the
 # config-editing path, not upstream mining. GPLv3.
 set -u
 cd "$(dirname "$0")/../.."
-make serpentx-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
+make dualpool-splitter >/dev/null 2>&1 || { echo "FAIL: compile"; exit 1; }
 RUN=/tmp/cfgedit; rm -rf "$RUN"; mkdir -p "$RUN"
 CFG="$RUN/config.json"; WEB=8096
 
@@ -16,7 +16,7 @@ cat > "$CFG" <<'EOF'
              {"url":"old-b.example:3333","user":"userB","pass":"passB","ckproxy_mode":"proxy"} ] }
 EOF
 
-SERPENTX_CKPOOL_BIN=/bin/true SERPENTX_RUNDIR="$RUN/run" ./serpentx-splitter --config "$CFG" >/tmp/cfgedit.log 2>&1 &
+DUALPOOL_CKPOOL_BIN=/bin/true DUALPOOL_RUNDIR="$RUN/run" ./dualpool-splitter --config "$CFG" >/tmp/cfgedit.log 2>&1 &
 SP=$!
 trap "kill $SP 2>/dev/null; wait 2>/dev/null" EXIT
 sleep 2

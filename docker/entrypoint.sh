@@ -1,5 +1,5 @@
 #!/bin/sh
-# SerpentX container entrypoint. If /config/config.json is present it is used
+# Dual-Pool Proxy container entrypoint. If /config/config.json is present it is used
 # as-is. Otherwise a config is generated from environment variables (the .env
 # quickstart) so non-developers never have to hand-edit JSON. GPLv3.
 set -e
@@ -7,13 +7,13 @@ CONFIG=/config/config.json
 
 if [ ! -f "$CONFIG" ]; then
   if [ -z "$POOL_A_URL" ] || [ -z "$POOL_B_URL" ]; then
-    echo "serpentx: no $CONFIG and POOL_A_URL/POOL_B_URL not set." >&2
-    echo "serpentx: mount a config at /config/config.json OR set env vars"    >&2
-    echo "serpentx: (see .env.example)."                                      >&2
+    echo "dualpool: no $CONFIG and POOL_A_URL/POOL_B_URL not set." >&2
+    echo "dualpool: mount a config at /config/config.json OR set env vars"    >&2
+    echo "dualpool: (see .env.example)."                                      >&2
     exit 1
   fi
   mkdir -p /config
-  echo "serpentx: generating $CONFIG from environment" >&2
+  echo "dualpool: generating $CONFIG from environment" >&2
 
   fa=""
   [ -n "$POOL_A_FAILOVER_URL" ] && fa=",\"failover\":{\"url\":\"$POOL_A_FAILOVER_URL\",\"user\":\"$POOL_A_USER\",\"pass\":\"${POOL_A_PASS:-x}\"}"
@@ -35,4 +35,4 @@ if [ ! -f "$CONFIG" ]; then
 EOF
 fi
 
-exec serpentx-splitter --config "$CONFIG"
+exec dualpool-splitter --config "$CONFIG"

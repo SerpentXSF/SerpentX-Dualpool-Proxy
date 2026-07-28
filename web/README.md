@@ -1,4 +1,4 @@
-# SerpentX web dashboard
+# Dual-Pool Proxy dashboard (by SerpentX)
 
 `index.html` is the single-file dashboard the `splitter` serves on `:8080`. It is
 self-contained (no build step, no external requests) and talks to the proxy via

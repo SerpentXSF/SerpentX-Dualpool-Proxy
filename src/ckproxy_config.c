@@ -1,6 +1,6 @@
 /*
  * ckproxy_config.c — emit ckpool proxy configs + spawn ckproxy. See header.
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3.
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3.
  * Copyright (C) 2025-2026 The SerpentX authors.
  */
 #include "ckproxy_config.h"
@@ -76,7 +76,7 @@ pid_t ckproxy_spawn(const char *ckpool_bin, const pool_cfg_t *pool,
         execl(ckpool_bin, ckpool_bin, mode_flag, "-k",
               "-c", config_path, "-s", sockdir, "-n", name, (char *)NULL);
         /* only reached on exec failure */
-        fprintf(stderr, "serpentx: exec %s failed\n", ckpool_bin);
+        fprintf(stderr, "dualpool: exec %s failed\n", ckpool_bin);
         _exit(127);
     }
     return pid;

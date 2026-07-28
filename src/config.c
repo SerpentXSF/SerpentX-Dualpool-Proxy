@@ -1,6 +1,6 @@
 /*
- * config.c — SerpentX config parser. See config.h.
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3.
+ * config.c — Dual-Pool Proxy config parser. See config.h.
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3.
  * Copyright (C) 2025-2026 The SerpentX authors.
  */
 #include "config.h"
@@ -68,7 +68,7 @@ static int clamp_interval_ms(int v)
     return v;
 }
 
-int config_parse_string(const char *json, serpentx_config_t *out,
+int config_parse_string(const char *json, dualpool_config_t *out,
                         char *err, size_t errlen)
 {
     memset(out, 0, sizeof(*out));
@@ -108,7 +108,7 @@ done:
     return rc;
 }
 
-int config_parse_file(const char *path, serpentx_config_t *out,
+int config_parse_file(const char *path, dualpool_config_t *out,
                       char *err, size_t errlen)
 {
     json_error_t je;

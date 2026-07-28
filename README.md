@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="web/serpentx-emblem.png" alt="SerpentX" height="160">
+  <img src="web/serpentx-emblem.png" alt="Dual-Pool Proxy" height="160">
 </p>
 
-<h1 align="center">SerpentX — Dual-Pool Stratum Proxy</h1>
+<h1 align="center">Dual-Pool Proxy — Dual-Pool Stratum Proxy</h1>
 
 <p align="center">
   <b>Mine any stock-firmware Stratum miner to two SHA-256 pools at once, in a ratio you choose — without reflashing anything.</b>
@@ -15,7 +15,7 @@
 ---
 
 Point your **BitAxe, NerdAxe, Antminer, HammerMiner, Avalon, or Whatsminer** at
-SerpentX instead of at a pool. It presents itself as **one** pool, then splits
+Dual-Pool Proxy instead of at a pool. It presents itself as **one** pool, then splits
 your hashrate across **two** real pools by a configurable ratio, with per-pool
 failover. No firmware changes, no warranty risk, one box for your whole fleet.
 
@@ -71,7 +71,7 @@ RATIO_A=70
 ## How it works
 
 ```
-  your miners ──► :3333  ┌── SerpentX splitter ──► ckproxy A ──► Pool A (+ failover)
+  your miners ──► :3333  ┌── Dual-Pool Proxy splitter ──► ckproxy A ──► Pool A (+ failover)
   (point here)           │  (routes each miner    └► ckproxy B ──► Pool B (+ failover)
   you ────────► :8080    │   by hashrate ratio)
                          └── live dashboard + /api + /metrics
@@ -90,7 +90,7 @@ right pool. The splitter owns allocation, failover/donation, accounting, and the
 
 ## Get a real edge
 
-SerpentX isn't just a splitter — it's a tool for the home miner to compete on
+Dual-Pool Proxy isn't just a splitter — it's a tool for the home miner to compete on
 **sovereignty, variance shaping, fee-sharing pool choice, and visibility**.
 The **sovereign preset** ([`config.sovereign.example.json`](config.sovereign.example.json))
 runs *OCEAN via a local DATUM Gateway (your own block templates, TIDES payouts) +
@@ -110,7 +110,7 @@ honest playbook (with the math, and what's hype): **[docs/STRATEGIES.md](docs/ST
 ## Why not just HAProxy?
 
 Weighted TCP balancing across two ckproxy backends gets you *most* of farm-split
-for free — and it's a good sanity check. SerpentX exists for the four things a
+for free — and it's a good sanity check. Dual-Pool Proxy exists for the four things a
 dumb TCP balancer can't do: **hashrate-weighted** allocation (not connection
 count), **per-pool share accounting**, **donation/recovery**, and **the
 dashboard**. If those don't matter to you, HAProxy is genuinely fine.
@@ -123,15 +123,15 @@ Targets Linux; on Windows use WSL/Docker. See
 
 ```bash
 make -C test/host run                       # pure-logic unit tests (plain gcc)
-docker build -f docker/Dockerfile.dev -t serpentx-dev .   # dev image (jansson, python, curl)
-docker run --rm -v "$PWD:/build" serpentx-dev ./test/integration/run_t2.sh        # split + routing
+docker build -f docker/Dockerfile.dev -t dualpool-dev .   # dev image (jansson, python, curl)
+docker run --rm -v "$PWD:/build" dualpool-dev ./test/integration/run_t2.sh        # split + routing
 #   run_failover.sh  run_webui.sh  run_timeslice.sh                               # more suites
 bash test/integration/run_t3.sh             # full stack: splitter + 2 real ckproxy (Docker)
 ```
 
 ## License
 
-**GPLv3.** SerpentX is a derivative of [ckpool](https://github.com/ckolivas/ckpool)
+**GPLv3.** Dual-Pool Proxy is a derivative of [ckpool](https://github.com/ckolivas/ckpool)
 (GPLv3), so it must be GPLv3 too. The reused allocation/failover files under
 `src/dual_pool/` originate from the author's ESP32 firmware project and are
 relicensed to GPLv3 here (provenance noted in each file header). See
@@ -143,7 +143,7 @@ relicensed to GPLv3 here (provenance noted in each file header). See
   Stratum proxy engine this builds on.
 - Prior art that proved the demand and the math: NerdQAxe firmware dual-pool,
   cgminer `--quota`, Braiins OS pool groups, LuxOS hashrate splitting.
-- The decentralization ecosystem SerpentX plugs into:
+- The decentralization ecosystem Dual-Pool Proxy plugs into:
   [OCEAN/DATUM](https://github.com/OCEAN-xyz/datum_gateway),
   [public-pool](https://github.com/benjamin-wilson/public-pool),
   [Stratum V2 / SRI](https://github.com/stratum-mining/stratum),

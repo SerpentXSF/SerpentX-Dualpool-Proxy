@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes to SerpentX are recorded here.
+All notable changes to Dual-Pool Proxy are recorded here.
 
-**Versioning:** the major is the literal **X** (SerpentX). The number bumps by
+**Versioning:** the major is the literal **X** (the SerpentX house line). The number bumps by
 **1** for a normal release and by **0.5** for smaller changes:
 
 ```
@@ -11,9 +11,25 @@ X.1  →  X.1.5 (small)  →  X.2  →  X.2.5  →  X.3 ...
 
 The version is the single source of truth in [`VERSION`](VERSION) /
 [`src/version.h`](src/version.h) and is shown in the dashboard footer,
-`GET /api/status` (`version`), and `/metrics` (`serpentx_build_info`).
+`GET /api/status` (`version`), and `/metrics` (`dualpool_build_info`).
 
 ---
+
+## X.2.5 — Renamed the product to "Dual-Pool Proxy"
+
+The tool is now named **Dual-Pool Proxy**; **SerpentX** is the maker/house brand
+(the name behind future tools), not the product name. The SerpentX crest stays on
+the dashboard as the maker's mark.
+
+**Breaking name changes — update any automation:**
+- Container / compose / image: `serpentx` → `dualpool-proxy`
+- Binary: `serpentx-splitter` → `dualpool-splitter`
+- Env vars: `SERPENTX_*` → `DUALPOOL_*`
+- Prometheus metrics: `serpentx_*` → `dualpool_*`
+- Runtime paths: `/tmp/serpentx` → `/tmp/dualpool`, `/usr/local/share/serpentx` → `/usr/local/share/dualpool`
+- Dashboard auth header: `X-SerpentX-Key` → `X-DualPool-Key`
+
+No functional behavior changed. The GitHub repo name is unchanged.
 
 ## X.2 — Accurate miner counts + churn-resilient supervision
 
@@ -23,7 +39,7 @@ Fixes surfaced by real-world testing:
   routing count. Previously "50 miners" meant "50 routings since start" (which
   balloons when miners reconnect); it now reflects live connections and drops to
   zero when miners leave. The actual-vs-target split is computed from current
-  connections. New metric `serpentx_miners_connected_pool{pool}`; per-pool
+  connections. New metric `dualpool_miners_connected_pool{pool}`; per-pool
   `connected` and `routed` fields in `/api/status`.
 - **Crash-loop resilience:** if a ckproxy keeps dying (e.g. the pool rejects the
   login), it now respawns with **exponential backoff** (1→32s) instead of hammering

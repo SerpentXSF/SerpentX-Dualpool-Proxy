@@ -1,7 +1,7 @@
 /*
- * alloc.h — hashrate-weighted pool allocator for SerpentX farm-split mode.
+ * alloc.h — hashrate-weighted pool allocator for Dual-Pool Proxy farm-split mode.
  *
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3 (derivative of ckpool).
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3 (derivative of ckpool).
  * Copyright (C) 2025-2026 The SerpentX authors.
  *
  * Assigns each new/reconnecting miner to pool A or B so that the realized split
@@ -11,8 +11,8 @@
  * per-miner hashrate weights it tracks the ratio by work, which is what matters
  * for small mixed fleets (one S19 dwarfs three BitAxes).
  */
-#ifndef SERPENTX_ALLOC_H
-#define SERPENTX_ALLOC_H
+#ifndef DUALPOOL_ALLOC_H
+#define DUALPOOL_ALLOC_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -37,4 +37,4 @@ void alloc_set_pool_up(alloc_t *al, pool_id_t pool, bool up);
  * as one unit. Updates internal accounting and returns POOL_A or POOL_B. */
 pool_id_t alloc_pick(alloc_t *al, uint32_t weight);
 
-#endif /* SERPENTX_ALLOC_H */
+#endif /* DUALPOOL_ALLOC_H */

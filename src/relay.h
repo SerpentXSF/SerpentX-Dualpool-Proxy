@@ -2,7 +2,7 @@
  * relay.h — transparent bidirectional byte relay between a miner (downstream)
  * and its assigned upstream (a ckproxy, or a pool directly in tests).
  *
- * Part of SerpentX (Dual-Pool Stratum Proxy). GPLv3 (derivative of ckpool).
+ * Part of Dual-Pool Proxy (Dual-Pool Stratum Proxy). GPLv3 (derivative of ckpool).
  * Copyright (C) 2025-2026 The SerpentX authors.
  *
  * Farm-split pins a whole miner session to one upstream, so the relay is a
@@ -10,8 +10,8 @@
  * are small (miners, not shares), so a poll()-based pump per connection is
  * simple and correct; the heavy multiplexing lives in ckproxy upstream.
  */
-#ifndef SERPENTX_RELAY_H
-#define SERPENTX_RELAY_H
+#ifndef DUALPOOL_RELAY_H
+#define DUALPOOL_RELAY_H
 
 #include <stddef.h>
 
@@ -25,4 +25,4 @@ typedef void (*relay_sniff_fn)(void *ctx, int up, const char *line, size_t len);
  * thread. Does not close the fds. */
 void relay_pump(int down_fd, int up_fd, relay_sniff_fn sniff, void *ctx);
 
-#endif /* SERPENTX_RELAY_H */
+#endif /* DUALPOOL_RELAY_H */
