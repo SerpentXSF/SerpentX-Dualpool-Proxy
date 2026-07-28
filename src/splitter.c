@@ -299,9 +299,13 @@ static void *conn_thread(void *arg)
 {
     conn_t *c = arg;
     relay_pump(c->down_fd, c->up_fd, sniff, c);
+    /* Free the slot BEFORE closing the fds. Once a fd number is closed the kernel
+     * can hand it to a new accept(); if the slot were still "used", evict_pool()/
+     * evict_all() could shutdown() that stranger's connection through the stale
+     * slot. relay_pump() has returned, so sniff() no longer touches the slot. */
+    conn_unregister(c->slot);
     close(c->down_fd);
     close(c->up_fd);
-    conn_unregister(c->slot);
     free(c);
     return NULL;
 }
@@ -634,13 +638,18 @@ static int apply_config_json(const char *body)
                 snprintf(P->ckproxy_mode, sizeof(P->ckproxy_mode), "%s", cm);
         }
     }
+    /* Persist while still holding the lock so the written file is a consistent
+     * snapshot (persist_config takes no lock of its own). */
+    persist_config();
+    int saved_ratio = g_cfg.ratio_a;
+    char saved_mode[16];
+    snprintf(saved_mode, sizeof(saved_mode), "%s", g_cfg.mode);
     pthread_mutex_unlock(&g_alloc_lock);
 
     json_decref(m);
-    persist_config();   /* write full config to disk */
     fprintf(stderr, "dualpool: config saved (ratio A=%d%% mode=%s); "
                     "pool/credential changes take effect on restart\n",
-            g_cfg.ratio_a, g_cfg.mode);
+            saved_ratio, saved_mode);
     return 0;
 }
 
@@ -749,6 +758,7 @@ static int run_accept_loop(int listen_port)
 
         int slot = conn_register(pool, down);
         conn_t *c = malloc(sizeof(*c));
+        if (!c) { conn_unregister(slot); close(down); close(up); continue; }
         c->down_fd = down;
         c->up_fd   = up;
         c->slot    = slot;
@@ -756,7 +766,7 @@ static int run_accept_loop(int listen_port)
         share_session_init(&c->sess, pool);
         pthread_t t;
         if (pthread_create(&t, NULL, conn_thread, c) != 0) {
-            close(down); close(up); conn_unregister(slot); free(c);
+            conn_unregister(slot); close(down); close(up); free(c);
             continue;
         }
         pthread_detach(t);
@@ -808,44 +818,60 @@ static void spawn_one(ckproxy_proc_t *p)
 static void *monitor_thread(void *arg)
 {
     (void)arg;
+    int64_t respawn_at[2] = {0, 0};   /* mono_us deadline; 0 = running / none pending */
     for (;;) {
+        /* Reap every child that died since the last tick without blocking, so a
+         * long respawn backoff on one pool never delays reaping/respawning the
+         * other. Each pool's respawn is scheduled independently below. */
         int status;
-        pid_t died = waitpid(-1, &status, 0);
-        if (died < 0) { usleep(500 * 1000); continue; }
-        for (int i = 0; i < 2; i++) {
-            if (g_ck[i].pid != died) continue;
+        pid_t died;
+        while ((died = waitpid(-1, &status, WNOHANG)) > 0) {
+            for (int i = 0; i < 2; i++) {
+                if (g_ck[i].pid != died) continue;
 
-            /* why did it die? — crash (signal) vs clean/error exit code */
-            if (WIFSIGNALED(status))
-                fprintf(stderr, "dualpool: ckproxy %s killed by signal %d\n",
-                        g_ck[i].name, WTERMSIG(status));
-            else if (WIFEXITED(status))
-                fprintf(stderr, "dualpool: ckproxy %s exited code %d\n",
-                        g_ck[i].name, WEXITSTATUS(status));
+                /* why did it die? — crash (signal) vs clean/error exit code */
+                if (WIFSIGNALED(status))
+                    fprintf(stderr, "dualpool: ckproxy %s killed by signal %d\n",
+                            g_ck[i].name, WTERMSIG(status));
+                else if (WIFEXITED(status))
+                    fprintf(stderr, "dualpool: ckproxy %s exited code %d\n",
+                            g_ck[i].name, WEXITSTATUS(status));
 
-            int64_t now = mono_us();
-            if (g_pool_last_exit_us[i] && now - g_pool_last_exit_us[i] < 15LL * 1000000)
-                g_pool_fail_streak[i]++;
-            else
-                g_pool_fail_streak[i] = 0;
-            g_pool_last_exit_us[i] = now;
+                int64_t now = mono_us();
+                if (g_pool_last_exit_us[i] && now - g_pool_last_exit_us[i] < 15LL * 1000000)
+                    g_pool_fail_streak[i]++;
+                else
+                    g_pool_fail_streak[i] = 0;
+                g_pool_last_exit_us[i] = now;
 
-            if (g_pool_fail_streak[i] >= 3 && !g_pool_crashloop[i]) {
-                g_pool_crashloop[i] = 1;
-                fprintf(stderr, "dualpool: ckproxy %s crash-looping (x%d) — pool marked "
-                        "DOWN, donating to the other pool. Check %s/console.log "
-                        "(often an upstream 'Invalid login').\n",
-                        g_ck[i].name, g_pool_fail_streak[i], g_ck[i].sock);
+                if (g_pool_fail_streak[i] >= 3 && !g_pool_crashloop[i]) {
+                    g_pool_crashloop[i] = 1;
+                    fprintf(stderr, "dualpool: ckproxy %s crash-looping (x%d) — pool marked "
+                            "DOWN, donating to the other pool. Check %s/console.log "
+                            "(often an upstream 'Invalid login').\n",
+                            g_ck[i].name, g_pool_fail_streak[i], g_ck[i].sock);
+                }
+
+                int shift = g_pool_fail_streak[i] > 5 ? 5 : g_pool_fail_streak[i];
+                unsigned backoff = 1u << shift;          /* 1,2,4,8,16,32 s */
+                if (backoff > 30) backoff = 30;
+                fprintf(stderr, "dualpool: ckproxy %s exited; respawn in %us\n",
+                        g_ck[i].name, backoff);
+                g_ck[i].pid = 0;   /* reaped; not running until respawned */
+                respawn_at[i] = now + (int64_t)backoff * 1000000;
             }
-
-            int shift = g_pool_fail_streak[i] > 5 ? 5 : g_pool_fail_streak[i];
-            unsigned backoff = 1u << shift;          /* 1,2,4,8,16,32 s */
-            if (backoff > 30) backoff = 30;
-            fprintf(stderr, "dualpool: ckproxy %s exited; respawn in %us\n",
-                    g_ck[i].name, backoff);
-            sleep(backoff);
-            spawn_one(&g_ck[i]);
         }
+        /* Respawn each pool whose backoff has elapsed, independently. */
+        int64_t now = mono_us();
+        for (int i = 0; i < 2; i++) {
+            if (respawn_at[i] && now >= respawn_at[i]) {
+                respawn_at[i] = 0;
+                spawn_one(&g_ck[i]);
+                if (g_ck[i].pid <= 0)          /* fork() failed — retry soon, don't give up */
+                    respawn_at[i] = now + 1000000;
+            }
+        }
+        usleep(200 * 1000);   /* 200 ms supervision tick */
     }
     return NULL;
 }

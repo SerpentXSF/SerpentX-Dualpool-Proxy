@@ -23,7 +23,16 @@ test_share: test_share.c ../../src/share_accounting.c
 test_health: test_health.c ../../src/health.c $(DP)/pool_failover.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-clean:
-	rm -f $(TESTS)
+# Config parser + ckproxy-emit tests. These need jansson, so they are not part of
+# the socket-free `run` set; run them where libjansson-dev is present (the
+# dualpool-dev image, or a Linux host): `make config`.
+config: test_config
+	@echo "== test_config =="; ./test_config
 
-.PHONY: run build clean
+test_config: test_config.c ../../src/config.c ../../src/ckproxy_config.c $(DP)/dual_clamp.c
+	$(CC) $(CFLAGS) -o $@ $^ -ljansson
+
+clean:
+	rm -f $(TESTS) test_config
+
+.PHONY: run build config clean

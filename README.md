@@ -131,6 +131,7 @@ Targets Linux; on Windows use WSL/Docker. See
 ```bash
 make -C test/host run                       # pure-logic unit tests (plain gcc)
 docker build -f docker/Dockerfile.dev -t dualpool-dev .   # dev image (jansson, python, curl)
+docker run --rm -v "$PWD:/build" dualpool-dev make -C test/host config            # config parser tests (jansson)
 docker run --rm -v "$PWD:/build" dualpool-dev ./test/integration/run_t2.sh        # split + routing
 #   run_failover.sh  run_webui.sh  run_timeslice.sh                               # more suites
 bash test/integration/run_t3.sh             # full stack: splitter + 2 real ckproxy (Docker)

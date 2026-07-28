@@ -5,6 +5,10 @@
 set -e
 CONFIG=/config/config.json
 
+# Escape a value for embedding inside a JSON string (backslash and double-quote),
+# so a special character in a password/username can't produce invalid JSON.
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 if [ ! -f "$CONFIG" ]; then
   if [ -z "$POOL_A_URL" ] || [ -z "$POOL_B_URL" ]; then
     echo "dualpool: no $CONFIG and POOL_A_URL/POOL_B_URL not set." >&2
@@ -15,29 +19,36 @@ if [ ! -f "$CONFIG" ]; then
   mkdir -p /config
   echo "dualpool: generating $CONFIG from environment" >&2
 
-  fa=""
-  [ -n "$POOL_A_FAILOVER_URL" ] && fa=",\"failover\":{\"url\":\"$POOL_A_FAILOVER_URL\",\"user\":\"$POOL_A_USER\",\"pass\":\"${POOL_A_PASS:-x}\"}"
-  fb=""
-  [ -n "$POOL_B_FAILOVER_URL" ] && fb=",\"failover\":{\"url\":\"$POOL_B_FAILOVER_URL\",\"user\":\"$POOL_B_USER\",\"pass\":\"${POOL_B_PASS:-x}\"}"
+  # Escape every string value that gets embedded in the JSON.
+  A_URL=$(esc "$POOL_A_URL");  A_USER=$(esc "$POOL_A_USER");  A_PASS=$(esc "${POOL_A_PASS:-x}");  A_MODE=$(esc "${POOL_A_MODE:-userproxy}")
+  B_URL=$(esc "$POOL_B_URL");  B_USER=$(esc "$POOL_B_USER");  B_PASS=$(esc "${POOL_B_PASS:-x}");  B_MODE=$(esc "${POOL_B_MODE:-userproxy}")
+  WEBPW=$(esc "${WEB_PASSWORD:-}")
+  MODEV=$(esc "${MODE:-farm_split}")
 
-  # Optional per-pool difficulty floor (numbers; only emitted when set).
+  fa=""
+  [ -n "$POOL_A_FAILOVER_URL" ] && fa=",\"failover\":{\"url\":\"$(esc "$POOL_A_FAILOVER_URL")\",\"user\":\"$A_USER\",\"pass\":\"$A_PASS\"}"
+  fb=""
+  [ -n "$POOL_B_FAILOVER_URL" ] && fb=",\"failover\":{\"url\":\"$(esc "$POOL_B_FAILOVER_URL")\",\"user\":\"$B_USER\",\"pass\":\"$B_PASS\"}"
+
+  # Optional per-pool difficulty floor. Emit only if the value is a plain integer,
+  # so a stray value can't inject into the JSON.
   da=""
-  [ -n "$POOL_A_STARTDIFF" ] && da="$da,\"startdiff\":$POOL_A_STARTDIFF"
-  [ -n "$POOL_A_MINDIFF" ]   && da="$da,\"mindiff\":$POOL_A_MINDIFF"
+  case "$POOL_A_STARTDIFF" in ''|*[!0-9]*) ;; *) da="$da,\"startdiff\":$POOL_A_STARTDIFF" ;; esac
+  case "$POOL_A_MINDIFF"   in ''|*[!0-9]*) ;; *) da="$da,\"mindiff\":$POOL_A_MINDIFF"     ;; esac
   db=""
-  [ -n "$POOL_B_STARTDIFF" ] && db="$db,\"startdiff\":$POOL_B_STARTDIFF"
-  [ -n "$POOL_B_MINDIFF" ]   && db="$db,\"mindiff\":$POOL_B_MINDIFF"
+  case "$POOL_B_STARTDIFF" in ''|*[!0-9]*) ;; *) db="$db,\"startdiff\":$POOL_B_STARTDIFF" ;; esac
+  case "$POOL_B_MINDIFF"   in ''|*[!0-9]*) ;; *) db="$db,\"mindiff\":$POOL_B_MINDIFF"     ;; esac
 
   cat > "$CONFIG" <<EOF
 {
   "downstream": { "stratum_port": ${STRATUM_PORT:-3333}, "web_port": ${WEB_PORT:-8080} },
-  "mode": "${MODE:-farm_split}",
+  "mode": "${MODEV}",
   "ratio_a": ${RATIO_A:-70},
   "interval_ms": ${INTERVAL_MS:-180000},
-  "web_password": "${WEB_PASSWORD:-}",
+  "web_password": "${WEBPW}",
   "pools": [
-    { "url": "${POOL_A_URL}", "user": "${POOL_A_USER}", "pass": "${POOL_A_PASS:-x}", "ckproxy_mode": "${POOL_A_MODE:-userproxy}"${da}${fa} },
-    { "url": "${POOL_B_URL}", "user": "${POOL_B_USER}", "pass": "${POOL_B_PASS:-x}", "ckproxy_mode": "${POOL_B_MODE:-userproxy}"${db}${fb} }
+    { "url": "${A_URL}", "user": "${A_USER}", "pass": "${A_PASS}", "ckproxy_mode": "${A_MODE}"${da}${fa} },
+    { "url": "${B_URL}", "user": "${B_USER}", "pass": "${B_PASS}", "ckproxy_mode": "${B_MODE}"${db}${fb} }
   ]
 }
 EOF

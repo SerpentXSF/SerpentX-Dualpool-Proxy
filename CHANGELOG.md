@@ -15,6 +15,25 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ---
 
+## X.3.5 — Hardening & robustness
+
+Small, non-behavioral fixes on top of X.3, from a full code audit. No config or
+usage changes.
+
+- **Supervisor:** a died ckproxy is now reaped and respawned without blocking the
+  other pool — a long backoff on one pool no longer delays recovering the other.
+- **Connection teardown:** a closing miner's slot is freed before its socket is
+  closed, so a just-freed file descriptor can't be shut down out from under a new
+  connection during pool eviction.
+- **Config save:** the config file is now written from a locked, consistent
+  snapshot.
+- **Entrypoint:** environment values are JSON-escaped when generating `config.json`,
+  so a password containing `"` or `\` no longer produces an invalid config; per-pool
+  `startdiff`/`mindiff` are validated as integers.
+- **Web server:** a null-allocation guard on the accept path.
+- **Tests:** the config-parser test suite now has a `make config` target and is run
+  in the documented dev-image flow.
+
 ## X.3 — Proxied miners now mine valid shares on real pools
 
 This release fixes the core issue that made proxied miners' shares get rejected or
