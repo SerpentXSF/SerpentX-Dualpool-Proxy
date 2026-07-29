@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -110,6 +111,12 @@ typedef struct {
 
     /* config knobs */
     int      ratio_a, target_shares, min_s, max_s;
+    int      start_pool;         /* <0 seed from ratio; 0/1 begin on that pool */
+
+    /* M5 capability detection: true once the miner sends
+     * mining.extranonce.subscribe (=> honours set_extranonce, smooth swaps).
+     * false => reconnect-slice fallback at the deadline. */
+    bool     miner_ext_ok;
 
     linebuf_t bmin;              /* miner  -> mux */
     linebuf_t bup[2];            /* upstream[p] -> mux */
@@ -467,8 +474,13 @@ static int dual_handshake(mux_t *m)
     if (read_subscribe_result(m, 0) < 0) return -1;
     if (read_subscribe_result(m, 1) < 0) return -1;
 
-    /* 4. seed the active pool (A when the ratio favours A) */
-    m->active = (m->ratio_a >= 50) ? 0 : 1;
+    /* 4. seed the active pool: an explicit start_pool (0/1) wins so the splitter
+     * can alternate reconnecting fallback miners; otherwise fall back to the
+     * ratio (A when the ratio favours A). */
+    if (m->start_pool == 0 || m->start_pool == 1)
+        m->active = m->start_pool;
+    else
+        m->active = (m->ratio_a >= 50) ? 0 : 1;
 
     /* 5. reply to the miner with the active pool's session params */
     pool_t *ap = &m->pool[m->active];
@@ -499,6 +511,16 @@ static int dual_handshake(mux_t *m)
                 (long long)msg.id);
             if (cl < 0 || (size_t)cl >= sizeof cr) return -1;
             if (write_all(m->down_fd, cr, (size_t)cl) < 0)
+                return -1;
+            continue;
+        }
+        if (msg.type == SM_EXTRANONCE_SUBSCRIBE) {
+            /* M5: the miner advertises set_extranonce support here (common:
+             * right after subscribe, before authorize). Record capability and
+             * forward to the active pool as normal chatter so its ack relays
+             * back to the miner (FIX-1). Keep waiting for the authorize. */
+            m->miner_ext_ok = true;
+            if (write_all(m->pool[m->active].fd, line, ll) < 0)
                 return -1;
             continue;
         }
@@ -735,9 +757,14 @@ static int process_lines(mux_t *m, linebuf_t *lb, bool from_up, int p)
                 if (handle_upstream_line(m, p, tmp, linelen) < 0) { rc = -1; break; }
             } else {
                 stratum_msg_t msg;
-                if (stratum_msg_parse(tmp, &msg) == 0 && msg.type == SM_SUBMIT) {
+                bool parsed = (stratum_msg_parse(tmp, &msg) == 0);
+                if (parsed && msg.type == SM_SUBMIT) {
                     if (handle_submit(m, msg.job_id, tmp, linelen) < 0) { rc = -1; break; }
                 } else {
+                    /* M5: a post-authorize extranonce.subscribe still marks the
+                     * miner as set_extranonce-capable (smooth-swap path). */
+                    if (parsed && msg.type == SM_EXTRANONCE_SUBSCRIBE)
+                        m->miner_ext_ok = true;
                     /* non-submit miner chatter -> active pool */
                     if (write_all(m->pool[m->active].fd, tmp, linelen) < 0) { rc = -1; break; }
                 }
@@ -787,6 +814,11 @@ static void splitmux_dual(mux_t *m)
      * (they may already be buffered from the handshake reads). */
     if (process_lines(m, &m->bup[0], true, 0) < 0) return;
     if (process_lines(m, &m->bup[1], true, 1) < 0) return;
+    /* Also drain anything the miner pipelined after authorize (e.g. a
+     * mining.extranonce.subscribe in the same TCP segment): otherwise a capable
+     * miner that then stays silent through the first slice would be misdetected
+     * as naive and needlessly reconnect-sliced. */
+    if (process_lines(m, &m->bmin, false, -1) < 0) return;
 
     for (;;) {
         struct pollfd pfds[3];
@@ -829,6 +861,19 @@ static void splitmux_dual(mux_t *m)
             int tgt = split_sched_next_pool(m->active, m->a_us, m->b_us,
                                             m->ratio_a);
             if (tgt != m->active) {
+                /* M5 reconnect-slice fallback: a miner that never advertised
+                 * set_extranonce support cannot follow a smooth swap (it would
+                 * keep the old pool's extranonce1 while mining the new pool's
+                 * jobs -> 100% rejects). Instead of swapping, drop the miner so
+                 * it reconnects; the splitter (M6.2) alternates start_pool to
+                 * bind it to the next pool. We mined only the active upstream on
+                 * this connection; the caller owns and closes all fds. */
+                if (!m->miner_ext_ok) {
+                    fprintf(stderr, "splitmux: fallback reconnect-slice "
+                                    "(miner lacks set_extranonce)\n");
+                    shutdown(m->down_fd, SHUT_RDWR);
+                    return;
+                }
                 m->target = tgt;
                 /* FIX-5: if the target has already sent a notify, swap NOW onto
                  * its current job (rewritten clean_jobs=true) instead of waiting
@@ -854,11 +899,12 @@ static void splitmux_dual(mux_t *m)
 }
 
 void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
-                  int target_shares, int min_s, int max_s)
+                  int target_shares, int min_s, int max_s, int start_pool)
 {
     if (up_fd[1] < 0) {
         /* Single-pool passthrough (M3 / fallback): scheduler knobs unused. */
         (void)ratio_a; (void)target_shares; (void)min_s; (void)max_s;
+        (void)start_pool;
         splitmux_passthrough(down_fd, up_fd[0]);
         return;
     }
@@ -872,5 +918,6 @@ void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
     m.target_shares = target_shares;
     m.min_s = min_s;
     m.max_s = max_s;
+    m.start_pool = start_pool;
     splitmux_dual(&m);
 }

@@ -61,6 +61,10 @@ def main():
     except Exception:
         return 2
 
+    # Advertise mining.set_extranonce support so the mux keeps the smooth-swap
+    # path (M5 capability detection). A naive miner omits this and is instead
+    # reconnect-sliced; see fake_miner_naive.py.
+    send({"id": 3, "method": "mining.extranonce.subscribe", "params": []})
     send({"id": 2, "method": "mining.authorize", "params": [worker, "x"]})
 
     cur_diff, cur_job = 1, ""

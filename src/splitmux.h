@@ -11,11 +11,23 @@
    sockets. In M3 only up_fd[0] is used (up_fd[1] == -1). Blocks until the miner
    or the upstream disconnects, then returns. Does NOT close the fds.
 
+   start_pool selects which pool the dual-mode session begins on:
+     start_pool < 0        -> seed the active pool from ratio_a (M4 default)
+     start_pool == 0 or 1  -> begin with that pool active. Used by the splitter
+                              to alternate which pool a reconnecting fallback
+                              (M5 reconnect-slice) miner lands on.
+
+   M5 capability fallback: a miner that never sends mining.extranonce.subscribe
+   is assumed not to honour mining.set_extranonce. For such a miner the mux does
+   NOT emit a smooth set_extranonce swap; instead, at the slice deadline it
+   shutdown()s down_fd and returns so the miner reconnects (and the splitter
+   binds it to the next pool via start_pool). down_fd/up_fd are NOT closed.
+
    Precondition: the process must ignore SIGPIPE (the splitter does so at
    startup; the standalone test probe does the same). Writes to a peer that
    closed then surface as a normal error and unwind cleanly instead of killing
    the process. */
 void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
-                  int target_shares, int min_s, int max_s);
+                  int target_shares, int min_s, int max_s, int start_pool);
 
 #endif /* DUALPOOL_SPLITMUX_H */

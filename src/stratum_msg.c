@@ -43,6 +43,8 @@ int stratum_msg_parse(const char *line, stratum_msg_t *out)
         out->type = SM_SET_EXTRANONCE;
         cpy(out->enonce1, sizeof(out->enonce1), json_array_get(p, 0));
         out->n2len = (int)json_integer_value(json_array_get(p, 1));
+    } else if (meth && !strcmp(meth, "mining.extranonce.subscribe")) {
+        out->type = SM_EXTRANONCE_SUBSCRIBE;
     } else if (meth && !strcmp(meth, "mining.subscribe")) {
         out->type = SM_SUBSCRIBE;
     } else if (meth && !strcmp(meth, "mining.authorize")) {

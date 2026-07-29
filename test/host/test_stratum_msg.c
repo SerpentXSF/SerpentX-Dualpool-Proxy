@@ -25,6 +25,17 @@ static void test_parse_submit(void){
     assert(strcmp(m.worker,"wallet.w1")==0);
 }
 
+static void test_parse_extranonce_subscribe(void){
+    const char *l = "{\"id\":3,\"method\":\"mining.extranonce.subscribe\",\"params\":[]}";
+    stratum_msg_t m; assert(stratum_msg_parse(l,&m)==0);
+    assert(m.type==SM_EXTRANONCE_SUBSCRIBE);
+    assert(m.id==3);
+    /* mining.subscribe must NOT be misclassified as the extranonce variant. */
+    const char *s = "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}";
+    stratum_msg_t m2; assert(stratum_msg_parse(s,&m2)==0);
+    assert(m2.type==SM_SUBSCRIBE);
+}
+
 static void test_emit_set_extranonce(void){
     char buf[256];
     int n = sm_emit_set_extranonce(buf, sizeof buf, "29cc886a", 8);
@@ -54,6 +65,7 @@ static void test_emit_overflow(void){
 int main(void){
     test_parse_notify();
     test_parse_submit();
+    test_parse_extranonce_subscribe();
     test_emit_set_extranonce();
     test_emit_set_difficulty();
     test_emit_overflow();

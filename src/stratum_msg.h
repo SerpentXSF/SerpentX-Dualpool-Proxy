@@ -13,7 +13,7 @@
 
 typedef enum { SM_UNKNOWN, SM_SUBSCRIBE, SM_AUTHORIZE, SM_CONFIGURE,
                SM_SUBMIT, SM_NOTIFY, SM_SET_DIFFICULTY, SM_SET_EXTRANONCE,
-               SM_RESULT } sm_type_t;
+               SM_EXTRANONCE_SUBSCRIBE, SM_RESULT } sm_type_t;
 
 typedef struct {
     sm_type_t type;
