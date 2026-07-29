@@ -32,7 +32,22 @@ config: test_config
 test_config: test_config.c ../../src/config.c ../../src/ckproxy_config.c $(DP)/dual_clamp.c
 	$(CC) $(CFLAGS) -o $@ $^ -ljansson
 
-clean:
-	rm -f $(TESTS) test_config
+# Stratum message parser/emit tests. Pure/socket-free but needs jansson, so run
+# alongside `config`: `make stratum`.
+stratum: test_stratum_msg
+	@echo "== test_stratum_msg =="; ./test_stratum_msg
 
-.PHONY: run build config clean
+test_stratum_msg: test_stratum_msg.c ../../src/stratum_msg.c
+	$(CC) $(CFLAGS) -o $@ $^ -ljansson
+
+# Adaptive slice scheduler tests. Pure/socket-free, no jansson needed: `make sched`.
+sched: test_split_sched
+	@echo "== test_split_sched =="; ./test_split_sched
+
+test_split_sched: test_split_sched.c ../../src/split_sched.c
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+clean:
+	rm -f $(TESTS) test_config test_stratum_msg test_split_sched
+
+.PHONY: run build config stratum sched clean
