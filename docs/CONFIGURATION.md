@@ -104,6 +104,14 @@ stock firmware offers.
 
 ## `hashrate_split` mode
 
+> ⚠️ **Experimental — not production-ready.** This mode passes the full test suite
+> but a live trial against real pools (with ckproxy in `userproxy` mode) found it
+> does not yet reliably deliver shares to the second pool: the mux's upstream
+> handshake can outrun a ckproxy that isn't ready to serve a subscription, and the
+> miner then stays on a single pool. **Don't rely on it for real mining yet** —
+> use `farm_split` (2+ miners) or `time_slice` (one miner). It is being actively
+> fixed; this note will be removed once it's validated live.
+
 `hashrate_split` puts a **single miner on both pools at the same time**, the way
 some dual-pool BitAxe/NerdQAxe firmware works — but without reflashing anything.
 The miner connects once, to the proxy; internally, the proxy multiplexes it

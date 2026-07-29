@@ -17,7 +17,8 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ## Unreleased
 
-- **New mode — `hashrate_split`:** a single miner can now mine **both pools at
+- **New mode — `hashrate_split` (EXPERIMENTAL — not yet validated against live
+  pools):** a single miner can *in principle* mine **both pools at
   once**, the way some dual-pool BitAxe/NerdQAxe firmware works, but without
   reflashing — the proxy multiplexes one downstream connection across both
   upstreams and time-slices it by share count (`target_shares`, clamped between
@@ -28,7 +29,12 @@ The version is the single source of truth in [`VERSION`](VERSION) /
   (`POST /api/config` accepts and persists `target_shares`/`min_slice_s`/
   `max_slice_s`, `GET /api/status` reports them back). Like other mode/knob
   changes, it's restart-applied.
-  Known limitations of this first release: split-connection shares are
+  **Status:** the mode is fully implemented and passes the test suite, but a live
+  trial against real pools (ckproxy in `userproxy` mode) found it does not yet
+  reliably deliver shares to the second pool — the mux's upstream handshake can
+  outrun a ckproxy that isn't ready to serve a subscription, and the miner then
+  stays on one pool. **Do not use in production yet.** Being actively fixed.
+  Other known limitations: split-connection shares are
   credited at the pools but not yet counted in this proxy's own dashboard
   tally (verify on the pool's own dashboard); and the 90s no-work
   auto-donation is reduced for pools serving only split connections, mitigated
