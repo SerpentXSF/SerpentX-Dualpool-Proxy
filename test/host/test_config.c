@@ -63,6 +63,75 @@ static void test_defaults(void) {
     assert(strcmp(c.pools[0].ckproxy_mode, "userproxy") == 0);   /* default */
 }
 
+/* hashrate_split mode is accepted and its slice knobs parse (with defaults). */
+static void test_hashrate_split(void) {
+    const char *j =
+        "{ \"mode\": \"hashrate_split\", \"target_shares\": 8, \"ratio_a\": 50,"
+        "  \"pools\": ["
+        "    {\"url\":\"a:1\",\"user\":\"u\",\"pass\":\"p\"},"
+        "    {\"url\":\"b:2\",\"user\":\"u\",\"pass\":\"p\"} ] }";
+    dualpool_config_t c; char err[256];
+    assert(config_parse_string(j, &c, err, sizeof(err)) == 0);
+    /* mode is retained (not coerced back to farm_split) */
+    assert(strcmp(c.mode, "hashrate_split") == 0);
+    assert(c.target_shares == 8);
+    /* absent knobs default to 10 / 10 / 120 */
+    assert(c.min_slice_s == 10);
+    assert(c.max_slice_s == 120);
+
+    /* and when the knobs are entirely absent, target_shares also defaults to 10 */
+    const char *d =
+        "{ \"mode\": \"hashrate_split\", \"pools\": ["
+        "    {\"url\":\"a:1\",\"user\":\"u\",\"pass\":\"p\"},"
+        "    {\"url\":\"b:2\",\"user\":\"u\",\"pass\":\"p\"} ] }";
+    assert(config_parse_string(d, &c, err, sizeof(err)) == 0);
+    assert(strcmp(c.mode, "hashrate_split") == 0);
+    assert(c.target_shares == 10);
+    assert(c.min_slice_s == 10);
+    assert(c.max_slice_s == 120);
+}
+
+/* D4: the hashrate_split slice knobs are clamped and min<=max is enforced. */
+static void test_slice_knobs_clamped(void) {
+    /* over-range + inverted: target too big, min too big, max = 0 (the churn
+     * trigger). Expect target->1000, min->3600, max raised to >= min. */
+    const char *hi =
+        "{ \"mode\": \"hashrate_split\","
+        "  \"target_shares\": 100000, \"min_slice_s\": 5000, \"max_slice_s\": 0,"
+        "  \"pools\": ["
+        "    {\"url\":\"a:1\",\"user\":\"u\",\"pass\":\"p\"},"
+        "    {\"url\":\"b:2\",\"user\":\"u\",\"pass\":\"p\"} ] }";
+    dualpool_config_t c; char err[256];
+    assert(config_parse_string(hi, &c, err, sizeof(err)) == 0);
+    assert(c.target_shares == 1000);
+    assert(c.min_slice_s == 3600);
+    assert(c.max_slice_s == 3600);           /* raised to min after max clamped to 1 */
+    assert(c.min_slice_s <= c.max_slice_s);
+
+    /* under-range: zero/negative knobs floor to 1. */
+    const char *lo =
+        "{ \"mode\": \"hashrate_split\","
+        "  \"target_shares\": 0, \"min_slice_s\": 0, \"max_slice_s\": -5,"
+        "  \"pools\": ["
+        "    {\"url\":\"a:1\",\"user\":\"u\",\"pass\":\"p\"},"
+        "    {\"url\":\"b:2\",\"user\":\"u\",\"pass\":\"p\"} ] }";
+    assert(config_parse_string(lo, &c, err, sizeof(err)) == 0);
+    assert(c.target_shares == 1);
+    assert(c.min_slice_s == 1);
+    assert(c.max_slice_s == 1);
+
+    /* an ordinary inverted pair (min>max, both in range) raises max up to min. */
+    const char *inv =
+        "{ \"mode\": \"hashrate_split\","
+        "  \"target_shares\": 10, \"min_slice_s\": 90, \"max_slice_s\": 30,"
+        "  \"pools\": ["
+        "    {\"url\":\"a:1\",\"user\":\"u\",\"pass\":\"p\"},"
+        "    {\"url\":\"b:2\",\"user\":\"u\",\"pass\":\"p\"} ] }";
+    assert(config_parse_string(inv, &c, err, sizeof(err)) == 0);
+    assert(c.min_slice_s == 90);
+    assert(c.max_slice_s == 90);
+}
+
 /* ratio is clamped into [0,100]. */
 static void test_ratio_clamped(void) {
     const char *j =
@@ -134,8 +203,10 @@ static void test_ckproxy_emit(void) {
 int main(void) {
     test_parse_full();
     test_defaults();
+    test_hashrate_split();
     printf("config: parse full + defaults passed\n");
     test_ratio_clamped();
+    test_slice_knobs_clamped();
     test_requires_two_pools();
     printf("config: clamp + validation passed\n");
     test_ckproxy_emit();

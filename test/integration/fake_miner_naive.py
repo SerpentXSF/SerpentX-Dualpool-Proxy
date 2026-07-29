@@ -56,8 +56,10 @@ def main():
 
         # subscribe + capture the enonce1 the mux hands us. We keep THIS value
         # for every submit on this connection, ignoring any set_extranonce.
+        # Generous subscribe wait: on the single-pool degrade path the mux only
+        # replies after its dead-pool handshake timeout (~5s) elapses.
         send({"id": 1, "method": "mining.subscribe", "params": ["dualpool-naive/1.0"]})
-        s.settimeout(5)
+        s.settimeout(10)
         try:
             first = s.recv(65536)
         except Exception:

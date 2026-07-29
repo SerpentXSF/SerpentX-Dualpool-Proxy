@@ -58,6 +58,13 @@
 #define SENTINEL_AUTHORIZE  90000002LL
 #define SENTINEL_CONFIGURE  90000003LL
 
+/* dual_handshake outcomes. DH_DEGRADED means exactly one pool failed its
+ * subscribe and the handshake has already handed the miner off to a single-pool
+ * relay on the survivor (D1b): the caller must NOT run the dual swap loop. */
+#define DH_OK        0
+#define DH_FAIL     (-1)
+#define DH_DEGRADED  1
+
 /* Per-direction line-assembly buffer. */
 typedef struct {
     char   data[SPLITMUX_BUF];
@@ -282,10 +289,35 @@ static int pump_verbatim(int from_fd, int to_fd, linebuf_t *lb)
     return 0;
 }
 
-static void splitmux_passthrough(int down_fd, int up)
+/* Forward the complete lines already buffered in lb to to_fd, leaving only a
+ * partial trailing line. Used to seed the degrade-to-single-pool relay with
+ * bytes the miner/pool pipelined during the dual handshake so nothing is lost.
+ * Returns 0, or -1 on write failure. */
+static int flush_buffered(int to_fd, linebuf_t *lb)
 {
-    linebuf_t d2u = { .len = 0, .scan = 0, .poison = false };
-    linebuf_t u2d = { .len = 0, .scan = 0, .poison = false };
+    size_t flush = 0;
+    for (size_t i = 0; i < lb->len; i++)
+        if (lb->data[i] == '\n')
+            flush = i + 1;
+    if (flush > 0) {
+        if (write_all(to_fd, lb->data, flush) < 0)
+            return -1;
+        memmove(lb->data, lb->data + flush, lb->len - flush);
+        lb->len -= flush;
+    }
+    lb->scan = lb->len;
+    lb->poison = false;
+    return 0;
+}
+
+/* Verbatim two-way relay between the miner and one upstream, seeded from
+ * pre-filled linebufs (empty for a from-scratch passthrough, or carrying
+ * handshake leftovers on the degrade path). */
+static void splitmux_relay_seeded(int down_fd, int up,
+                                  linebuf_t *d2u, linebuf_t *u2d)
+{
+    if (flush_buffered(up, d2u) < 0)      return;   /* miner  -> upstream leftovers */
+    if (flush_buffered(down_fd, u2d) < 0) return;   /* upstream -> miner leftovers */
 
     for (;;) {
         struct pollfd pfds[2];
@@ -302,14 +334,21 @@ static void splitmux_passthrough(int down_fd, int up)
             break;
 
         if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
-            if (pump_verbatim(down_fd, up, &d2u) < 0)
+            if (pump_verbatim(down_fd, up, d2u) < 0)
                 break;
         }
         if (pfds[1].revents & (POLLIN | POLLHUP | POLLERR)) {
-            if (pump_verbatim(up, down_fd, &u2d) < 0)
+            if (pump_verbatim(up, down_fd, u2d) < 0)
                 break;
         }
     }
+}
+
+static void splitmux_passthrough(int down_fd, int up)
+{
+    linebuf_t d2u = { .len = 0, .scan = 0, .poison = false };
+    linebuf_t u2d = { .len = 0, .scan = 0, .poison = false };
+    splitmux_relay_seeded(down_fd, up, &d2u, &u2d);
 }
 
 /* ============================== dual-pool path =========================== */
@@ -427,8 +466,42 @@ static int read_subscribe_result(mux_t *m, int p)
     }
 }
 
+/* D1b: exactly one pool's subscribe failed mid-handshake (it went workless/dead
+ * between the splitter's readiness gate and here). Rather than drop the miner,
+ * present the SURVIVING pool's session and relay verbatim to it for the rest of
+ * this connection — never arming a swap. `surv` is the good pool (0/1); the
+ * miner's subscribe id is `sub_id`. The miner mines a working pool instead of
+ * reconnect-looping against a dead one; a future reconnect re-attempts the
+ * split (self-healing). Returns DH_DEGRADED (relay ran to completion) or
+ * DH_FAIL if even the survivor's reply/relay could not be written. */
+static int single_pool_degrade(mux_t *m, int surv, int64_t sub_id)
+{
+    pool_t *ap = &m->pool[surv];
+    /* enonce1 was hex-validated in read_subscribe_result, so it cannot break
+     * the synthesized JSON here. */
+    char rep[512];
+    int rl = snprintf(rep, sizeof rep,
+        "{\"id\":%lld,\"result\":[[[\"mining.set_difficulty\",\"%s\"],"
+        "[\"mining.notify\",\"%s\"]],\"%s\",%d],\"error\":null}\n",
+        (long long)sub_id, ap->enonce1, ap->enonce1, ap->enonce1, ap->n2len);
+    if (rl < 0 || (size_t)rl >= sizeof rep ||
+        write_all(m->down_fd, rep, (size_t)rl) < 0)
+        return DH_FAIL;
+
+    fprintf(stderr, "splitmux: single-pool degrade -> mining pool %c "
+            "(other pool's handshake failed)\n", surv == 0 ? 'A' : 'B');
+
+    /* The mux already drove its sentinel subscribe to the survivor and consumed
+     * that reply; from here the miner's authorize/submits relay straight to the
+     * survivor. Seed the relay with anything already buffered during handshake. */
+    splitmux_relay_seeded(m->down_fd, ap->fd, &m->bmin, &m->bup[surv]);
+    return DH_DEGRADED;
+}
+
 /* Drive subscribe + authorize to both pools and synthesize the miner session.
- * Returns 0 on success, -1 if any peer disconnected during the handshake. */
+ * Returns DH_OK on the both-good dual path, DH_DEGRADED if exactly one pool
+ * failed and the miner was handed to a single-pool relay on the survivor (D1b),
+ * or DH_FAIL if the miner disconnected or both pools failed. */
 static int dual_handshake(mux_t *m)
 {
     char line[SPLITMUX_LINE];
@@ -470,9 +543,15 @@ static int dual_handshake(mux_t *m)
     if (write_all(m->pool[0].fd, sub, sizeof sub - 1) < 0) return -1;
     if (write_all(m->pool[1].fd, sub, sizeof sub - 1) < 0) return -1;
 
-    /* 3. capture each pool's extranonce1 / n2 size */
-    if (read_subscribe_result(m, 0) < 0) return -1;
-    if (read_subscribe_result(m, 1) < 0) return -1;
+    /* 3. capture each pool's extranonce1 / n2 size. D1b: capture each result
+     * INDEPENDENTLY. If exactly ONE pool fails (timeout/EOF), degrade to a
+     * single-pool relay on the survivor instead of dropping the miner; only if
+     * BOTH fail do we give up. */
+    bool okA = (read_subscribe_result(m, 0) == 0);
+    bool okB = (read_subscribe_result(m, 1) == 0);
+    if (!okA && !okB) return DH_FAIL;
+    if (!okA) return single_pool_degrade(m, 1, sub_id);   /* A dead -> mine B */
+    if (!okB) return single_pool_degrade(m, 0, sub_id);   /* B dead -> mine A */
 
     /* 4. seed the active pool: an explicit start_pool (0/1) wins so the splitter
      * can alternate reconnecting fallback miners; otherwise fall back to the
@@ -804,7 +883,10 @@ static int lb_fill(int fd, linebuf_t *lb)
 
 static void splitmux_dual(mux_t *m)
 {
-    if (dual_handshake(m) < 0)
+    /* DH_OK -> run the swap loop; DH_FAIL -> give up; DH_DEGRADED -> the
+     * handshake already handed the miner to a single-pool relay on the survivor
+     * (D1b) and it has now returned, so we're done. */
+    if (dual_handshake(m) != DH_OK)
         return;
 
     m->slice_start_us = now_us();

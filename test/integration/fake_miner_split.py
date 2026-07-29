@@ -37,9 +37,11 @@ def main():
         except Exception:
             pass
 
-    # subscribe + capture the mux's synthesized extranonce1/n2size
+    # subscribe + capture the mux's synthesized extranonce1/n2size. The wait is
+    # generous: on the single-pool DEGRADE path the mux only answers the miner
+    # after its per-pool handshake timeout (~5s) elapses on the dead pool.
     send({"id": 1, "method": "mining.subscribe", "params": ["dualpool-split/1.0"]})
-    s.settimeout(5)
+    s.settimeout(10)
     try:
         first = s.recv(65536)
     except Exception:

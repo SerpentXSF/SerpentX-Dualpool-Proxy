@@ -42,6 +42,7 @@
 #include "webui.h"
 #include "dual_clamp.h"
 #include "version.h"
+#include "splitmux.h"
 
 static const char *g_pool_host[2];
 static const char *g_pool_port[2];
@@ -55,6 +56,21 @@ static int              g_interval_ms  = 180000;
 static pool_scheduler_t g_sched;              /* reused error-diffusion, 1 slice/boundary */
 static pool_id_t        g_current_pool = POOL_A;
 static long             g_slice_n      = 0;
+
+/* -------- hashrate-split mode (one miner multiplexed across BOTH pools) ----
+ * Unlike time_slice (which recycles the miner's single upstream at a wall-clock
+ * boundary), hashrate_split runs the miner through the splitmux multiplexer:
+ * one downstream, two upstreams, per-slice pool swaps driven by share count.
+ * These knobs mirror g_time_slice/g_interval_ms. */
+static bool g_hashrate_split = false;
+static int  g_target_shares  = 10;
+static int  g_min_slice_s    = 10;
+static int  g_max_slice_s    = 120;
+/* Ratio-weighted (Bresenham) rotation for the start pool a fresh split
+ * connection lands on. Guards a static accumulator so ratio_a% of (re)connects
+ * begin on A — this is what gives reconnect-slice (naive) miners their A/B
+ * split, since blind alternation would ignore the ratio. */
+static pthread_mutex_t g_startpool_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* -------- live stats for the dashboard --------------------------------- */
 static share_totals_t g_totals;
@@ -199,6 +215,32 @@ static void setup_timeslice(int ratio, int interval_ms)
             interval_ms, ratio);
 }
 
+static void setup_hashrate_split(int ratio, int target, int min_s, int max_s)
+{
+    g_hashrate_split = true;
+    g_target_shares  = target;
+    g_min_slice_s    = min_s;
+    g_max_slice_s    = max_s;
+    fprintf(stderr, "dualpool: HASHRATE-SPLIT ratio A=%d%% target=%d shares/slice "
+            "(single-miner dual-pool)\n", ratio, target);
+}
+
+/* Ratio-weighted start-pool rotation (Bresenham error diffusion). Over many
+ * (re)connections ratio_a% return POOL_A. ratio_a is a single byte read outside
+ * g_alloc_lock — a torn read is impossible and a stale value only nudges one
+ * rotation, so no cross-lock ordering is introduced here. */
+static pool_id_t split_start_pool(void)
+{
+    static int err = 0;
+    int ratio_a = g_alloc.ratio_a;
+    pthread_mutex_lock(&g_startpool_lock);
+    err += ratio_a;
+    pool_id_t p;
+    if (err >= 100) { err -= 100; p = POOL_A; } else { p = POOL_B; }
+    pthread_mutex_unlock(&g_startpool_lock);
+    return p;
+}
+
 /* Connect a TCP socket to host:port. Returns fd or -1. */
 static int tcp_connect(const char *host, const char *port)
 {
@@ -310,6 +352,32 @@ static void *conn_thread(void *arg)
     return NULL;
 }
 
+/* ---- hashrate-split connection: run one miner through splitmux over BOTH
+ * upstreams (or a single-pool passthrough when only one connected). ---- */
+typedef struct {
+    int       down_fd;
+    int       up_fd[2];     /* {A,B}; up_fd[1] == -1 => single-pool passthrough */
+    int       slot;
+    int       start_pool;   /* 0/1, or -1 to seed from ratio (single-pool: ignored) */
+    int       ratio_a;      /* snapshot at accept time */
+} splitmux_conn_t;
+
+static void *splitmux_conn_thread(void *arg)
+{
+    splitmux_conn_t *c = arg;
+    splitmux_run(c->down_fd, c->up_fd, c->ratio_a, g_target_shares,
+                 g_min_slice_s, g_max_slice_s, c->start_pool);
+    /* Free the slot BEFORE closing fds — same fd-reuse eviction-race ordering
+     * conn_thread documents (evict_all/evict_pool must never shutdown() a fd
+     * number the kernel has already handed to a newer accept()). */
+    conn_unregister(c->slot);
+    close(c->down_fd);
+    if (c->up_fd[0] >= 0) close(c->up_fd[0]);
+    if (c->up_fd[1] >= 0) close(c->up_fd[1]);
+    free(c);
+    return NULL;
+}
+
 /* Pick a pool (allocator already skips DOWN pools) and connect upstream,
  * donating to the survivor if this single connect happens to fail. Global
  * up/down state is owned by the probe thread, not mutated here. */
@@ -339,6 +407,23 @@ static int open_upstream(pool_id_t *out_pool)
     }
     *out_pool = p;
     return up;
+}
+
+/* D3+D1a: is pool `p` ready to receive a fresh split connection? Mirrors the
+ * conditions open_upstream/the allocator already route around — a pool is
+ * NOT-ready if it is health-DOWN, crash-looping, or still inside its post-
+ * (re)spawn warmup window. Connecting (subscribing) to a not-ready ckproxy is
+ * exactly the workless-hang / stock-ckpool SIGABRT trigger, so the split branch
+ * must never tcp_connect() a not-ready pool. Uses the same lock discipline as
+ * the rest of the health reads (g_alloc_lock guards health/alloc state). */
+static bool split_pool_ready(pool_id_t p)
+{
+    if (mono_us() < g_pool_warmup_until_us[p]) return false;   /* warming up */
+    if (g_pool_crashloop[p])                   return false;   /* crash-looping */
+    pthread_mutex_lock(&g_alloc_lock);
+    bool up = health_pool_up(&g_health, p);
+    pthread_mutex_unlock(&g_alloc_lock);
+    return up;                                                 /* health verdict */
 }
 
 static int conn_count_pool(pool_id_t pool)
@@ -768,6 +853,75 @@ static int run_accept_loop(int listen_port)
         int down = accept(lfd, NULL, NULL);
         if (down < 0) { if (errno == EINTR) continue; break; }
 
+        /* -------- hashrate_split: multiplex this ONE miner across both pools.
+         * D3+D1a: gate on readiness EXACTLY like open_upstream/the allocator —
+         * connect only pools that are health-UP, not crash-looping, and past
+         * warmup. Both ready -> real split; exactly one ready -> single-pool
+         * passthrough on it (never subscribe a not-ready ckproxy: workless-hang /
+         * SIGABRT trigger); neither ready -> drop and let the miner retry. A
+         * ready pool whose connect still fails degrades to the surviving connect
+         * below. Skips the farm/time-slice open_upstream path. */
+        if (g_hashrate_split) {
+            bool readyA = split_pool_ready(POOL_A);
+            bool readyB = split_pool_ready(POOL_B);
+            if (!readyA && !readyB) { close(down); continue; }   /* neither ready */
+
+            pool_id_t sp = split_start_pool();
+            int upA = readyA ? tcp_connect(g_pool_host[POOL_A], g_pool_port[POOL_A]) : -1;
+            int upB = readyB ? tcp_connect(g_pool_host[POOL_B], g_pool_port[POOL_B]) : -1;
+            if (upA < 0 && upB < 0) { close(down); continue; }   /* ready pool(s) failed to connect */
+
+            int up_fd[2];
+            int start_pool;
+            pool_id_t reg_pool;   /* pool the conn is registered/counted under */
+            if (upA >= 0 && upB >= 0) {              /* real split */
+                up_fd[0] = upA; up_fd[1] = upB;
+                start_pool = (int)sp;
+                reg_pool = sp;
+            } else if (upA >= 0) {                   /* single-pool passthrough A */
+                up_fd[0] = upA; up_fd[1] = -1;
+                start_pool = -1;
+                reg_pool = POOL_A;
+            } else {                                 /* single-pool passthrough B */
+                up_fd[0] = upB; up_fd[1] = -1;
+                start_pool = -1;
+                reg_pool = POOL_B;
+            }
+
+            int slot = conn_register(reg_pool, down);
+            splitmux_conn_t *c = malloc(sizeof(*c));
+            if (!c) {
+                conn_unregister(slot); close(down);
+                if (up_fd[0] >= 0) close(up_fd[0]);
+                if (up_fd[1] >= 0) close(up_fd[1]);
+                continue;
+            }
+            c->down_fd    = down;
+            c->up_fd[0]   = up_fd[0];
+            c->up_fd[1]   = up_fd[1];
+            c->slot       = slot;
+            c->start_pool = start_pool;
+            pthread_mutex_lock(&g_alloc_lock);
+            c->ratio_a = g_alloc.ratio_a;
+            g_routed[reg_pool]++;
+            pthread_mutex_unlock(&g_alloc_lock);
+
+            fprintf(stderr, "dualpool: hsplit route -> start %c%s\n",
+                    (reg_pool == POOL_A) ? 'A' : 'B',
+                    (up_fd[1] < 0) ? " (single-pool)" : "");
+
+            pthread_t t;
+            if (pthread_create(&t, NULL, splitmux_conn_thread, c) != 0) {
+                conn_unregister(slot); close(down);
+                if (c->up_fd[0] >= 0) close(c->up_fd[0]);
+                if (c->up_fd[1] >= 0) close(c->up_fd[1]);
+                free(c);
+                continue;
+            }
+            pthread_detach(t);
+            continue;
+        }
+
         pool_id_t pool;
         int up = open_upstream(&pool);
         if (up < 0) { close(down); continue; }   /* both pools down */
@@ -946,6 +1100,9 @@ static int run_config_mode(const char *path)
     fprintf(stderr, "dualpool: mode=%s ratio A=%d%%\n", cfg.mode, cfg.ratio_a);
     if (!strcmp(cfg.mode, "time_slice"))
         setup_timeslice(cfg.ratio_a, cfg.interval_ms);
+    else if (!strcmp(cfg.mode, "hashrate_split"))
+        setup_hashrate_split(cfg.ratio_a, cfg.target_shares,
+                             cfg.min_slice_s, cfg.max_slice_s);
     webui_boot(cfg.web_port);
 
     pthread_t mon;
@@ -966,7 +1123,8 @@ static int run_config_mode(const char *path)
 /* -------- CLI mode: point straight at two upstreams (T2 harness) -------- */
 
 static int run_cli_mode(int listen_port, int ratio, char *a_arg, char *b_arg,
-                        int web_port, const char *mode, int interval_ms)
+                        int web_port, const char *mode, int interval_ms,
+                        int target_shares, int min_slice_s, int max_slice_s)
 {
     if (split_hostport(a_arg, &g_pool_host[POOL_A], &g_pool_port[POOL_A]) ||
         split_hostport(b_arg, &g_pool_host[POOL_B], &g_pool_port[POOL_B])) {
@@ -980,6 +1138,9 @@ static int run_cli_mode(int listen_port, int ratio, char *a_arg, char *b_arg,
     g_cfg.ratio_a = ratio;
     snprintf(g_cfg.mode, sizeof(g_cfg.mode), "%s", mode);
     g_cfg.interval_ms = interval_ms;
+    g_cfg.target_shares = target_shares;
+    g_cfg.min_slice_s   = min_slice_s;
+    g_cfg.max_slice_s   = max_slice_s;
     snprintf(g_cfg.pools[0].primary.url, sizeof(g_cfg.pools[0].primary.url), "%s:%s",
              g_pool_host[POOL_A], g_pool_port[POOL_A]);
     snprintf(g_cfg.pools[1].primary.url, sizeof(g_cfg.pools[1].primary.url), "%s:%s",
@@ -988,6 +1149,8 @@ static int run_cli_mode(int listen_port, int ratio, char *a_arg, char *b_arg,
     alloc_init(&g_alloc, (uint8_t)ratio);
     if (!strcmp(mode, "time_slice"))
         setup_timeslice(ratio, interval_ms);
+    else if (!strcmp(mode, "hashrate_split"))
+        setup_hashrate_split(ratio, target_shares, min_slice_s, max_slice_s);
     webui_boot(web_port);
     return run_accept_loop(listen_port);
 }
@@ -998,6 +1161,7 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
     signal(SIGHUP, sighup_handler);   /* reload config on SIGHUP */
     int listen_port = 3333, ratio = 50, web_port = 0, interval_ms = 180000;
+    int target_shares = 10, min_slice_s = 10, max_slice_s = 120;
     char *a_arg = NULL, *b_arg = NULL, *config_path = NULL, *mode = "farm_split";
 
     for (int i = 1; i < argc; i++) {
@@ -1011,7 +1175,15 @@ int main(int argc, char **argv)
             snprintf(g_webroot, sizeof(g_webroot), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--mode") && i + 1 < argc) mode = argv[++i];
         else if (!strcmp(argv[i], "--interval") && i + 1 < argc) interval_ms = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--target-shares") && i + 1 < argc) target_shares = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--min-slice") && i + 1 < argc) min_slice_s = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-slice") && i + 1 < argc) max_slice_s = atoi(argv[++i]);
     }
+
+    /* D4: clamp the hashrate_split slice knobs from the CLI (atoi) path too, so a
+     * `--max-slice 0` cannot make every deadline already-past (perpetual swap
+     * churn). The config-file path is clamped inside config_parse_string(). */
+    config_clamp_slice_knobs(&target_shares, &min_slice_s, &max_slice_s);
 
     if (config_path)
         return run_config_mode(config_path);
@@ -1021,9 +1193,11 @@ int main(int argc, char **argv)
             "usage:\n"
             "  %s --config /config/config.json           (production: spawns 2 ckproxy)\n"
             "  %s --listen P --poolA h:p --poolB h:p --ratio N [--web P] [--webroot DIR]\n"
-            "     [--mode farm_split|time_slice] [--interval MS]\n",
+            "     [--mode farm_split|time_slice|hashrate_split] [--interval MS]\n"
+            "     [--target-shares N] [--min-slice N] [--max-slice N]\n",
             argv[0], argv[0]);
         return 2;
     }
-    return run_cli_mode(listen_port, ratio, a_arg, b_arg, web_port, mode, interval_ms);
+    return run_cli_mode(listen_port, ratio, a_arg, b_arg, web_port, mode, interval_ms,
+                        target_shares, min_slice_s, max_slice_s);
 }

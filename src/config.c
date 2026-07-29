@@ -78,6 +78,23 @@ static int clamp_interval_ms(int v)
     return v;
 }
 
+static int clampi(int v, int lo, int hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+void config_clamp_slice_knobs(int *target_shares, int *min_slice_s,
+                              int *max_slice_s)
+{
+    *target_shares = clampi(*target_shares, 1, 1000);
+    *min_slice_s   = clampi(*min_slice_s, 1, 3600);
+    *max_slice_s   = clampi(*max_slice_s, 1, 3600);
+    if (*min_slice_s > *max_slice_s)   /* inverted -> raise max up to min */
+        *max_slice_s = *min_slice_s;
+}
+
 int config_parse_string(const char *json, dualpool_config_t *out,
                         char *err, size_t errlen)
 {
@@ -96,10 +113,19 @@ int config_parse_string(const char *json, dualpool_config_t *out,
 
     /* mode / ratio / interval */
     copy_str(out->mode, sizeof(out->mode), json_object_get(root, "mode"), "farm_split");
-    if (strcmp(out->mode, "farm_split") != 0 && strcmp(out->mode, "time_slice") != 0)
+    if (strcmp(out->mode, "farm_split") != 0 && strcmp(out->mode, "time_slice") != 0 &&
+        strcmp(out->mode, "hashrate_split") != 0)
         snprintf(out->mode, sizeof(out->mode), "%s", "farm_split");
     out->ratio_a     = dual_clamp_ratio(int_or(root, "ratio_a", 50));
     out->interval_ms = clamp_interval_ms(int_or(root, "interval_ms", 180000));
+
+    /* hashrate_split slice knobs (splitter-level, not per-pool). Defaults chosen
+     * so a single miner cycles pools every ~10 shares, clamped to 10..120 s. */
+    out->target_shares = int_or(root, "target_shares", 10);
+    out->min_slice_s   = int_or(root, "min_slice_s", 10);
+    out->max_slice_s   = int_or(root, "max_slice_s", 120);
+    config_clamp_slice_knobs(&out->target_shares, &out->min_slice_s,
+                             &out->max_slice_s);
     copy_str(out->web_password, sizeof(out->web_password),
              json_object_get(root, "web_password"), "");
 

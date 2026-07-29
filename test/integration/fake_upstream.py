@@ -43,8 +43,19 @@ def logline(path, s):
 def enonce1_for(tag):
     return "aaaa0001" if tag == "A" else "bbbb0001"
 
-def handle(conn, tag, logpath, interval, jobns):
+def handle(conn, tag, logpath, interval, jobns, workless=False):
     logline(logpath, f"{tag} conn")
+    if workless:
+        # "reachable but workless": accept the TCP connection and NEVER answer
+        # anything — no subscribe result, no notify. Simulates a ckproxy whose
+        # upstream has no work yet. The mux must time its handshake out and
+        # degrade to the healthy pool (D1b) instead of stranding the miner.
+        try:
+            while True:
+                if not conn.recv(65536):
+                    return                       # peer closed
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            return
     en1 = enonce1_for(tag)
     slock = threading.Lock()
     seq = [0]
@@ -120,6 +131,9 @@ def main():
                     help="ms between fresh clean notifies (overrides --interval)")
     ap.add_argument("--jobns", choices=("tag", "shared"), default="tag",
                     help="job-id namespace: 'tag' (A-/B-) or 'shared' (job-)")
+    ap.add_argument("--workless", action="store_true",
+                    help="accept TCP but answer NOTHING (never subscribe) — "
+                         "simulates a reachable-but-workless upstream")
     a = ap.parse_args()
     interval = a.notify_ms / 1000.0 if a.notify_ms > 0 else a.interval
 
@@ -143,7 +157,7 @@ def main():
         except OSError:
             break               # listener closed via SIGUSR1
         threading.Thread(target=handle,
-                         args=(conn, a.tag, a.log, interval, a.jobns),
+                         args=(conn, a.tag, a.log, interval, a.jobns, a.workless),
                          daemon=True).start()
 
     # keep the process (and its live handler threads) alive after we stop listening

@@ -29,8 +29,11 @@ typedef struct {
     int  stratum_port;    /* downstream miners (default 3333) */
     int  web_port;        /* dashboard (default 8080) */
     int  ratio_a;         /* Pool A target percent [0..100] */
-    char mode[16];        /* "farm_split" | "time_slice" */
+    char mode[16];        /* "farm_split" | "time_slice" | "hashrate_split" */
     int  interval_ms;     /* time_slice slice length (default 180000) */
+    int  target_shares;   /* hashrate_split: shares per slice (default 10) */
+    int  min_slice_s;     /* hashrate_split: min slice seconds (default 10) */
+    int  max_slice_s;     /* hashrate_split: max slice seconds (default 120) */
     char web_password[128];
     pool_cfg_t pools[2];
 } dualpool_config_t;
@@ -42,5 +45,14 @@ int config_parse_string(const char *json, dualpool_config_t *out,
                         char *err, size_t errlen);
 int config_parse_file(const char *path, dualpool_config_t *out,
                       char *err, size_t errlen);
+
+/* Clamp the hashrate_split slice knobs to sane ranges in place and enforce
+ * min_slice_s <= max_slice_s. Shared by the JSON config parser and the CLI
+ * (atoi) path so an out-of-range knob (e.g. max_slice_s <= 0, which makes every
+ * deadline already-past -> perpetual swap churn) cannot reach the scheduler.
+ *   target_shares -> [1,1000], min_slice_s -> [1,3600], max_slice_s -> [1,3600];
+ * an inverted pair raises max up to min. */
+void config_clamp_slice_knobs(int *target_shares, int *min_slice_s,
+                              int *max_slice_s);
 
 #endif /* DUALPOOL_CONFIG_H */
