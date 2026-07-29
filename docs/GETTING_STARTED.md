@@ -52,6 +52,12 @@ The container exposes two ports:
 > [CONFIGURATION.md](CONFIGURATION.md)). A mounted `config.json` takes precedence
 > over `.env`.
 
+> **Which pools work, and difficulty:** most pools work out of the box and set the
+> difficulty for you. A few (e.g. **public-pool.io**) enforce a minimum difficulty
+> and need a `startdiff` — see the
+> [pool compatibility table and suggested `startdiff` by hashrate](CONFIGURATION.md#pool-compatibility--starting-difficulty)
+> in the configuration guide.
+
 ---
 
 ## 3. Point your miners at Dual-Pool Proxy

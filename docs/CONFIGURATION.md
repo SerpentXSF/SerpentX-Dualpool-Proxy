@@ -107,6 +107,69 @@ Each pool is served by a stock `ckproxy` under the hood.
 
 ---
 
+## Pool compatibility & starting difficulty
+
+### Which pools work
+
+The proxy relays standard Stratum V1 and forwards your miners' ASICBoost
+version-rolling bits, so it works with the large majority of SHA-256 pools. Verified
+with real hardware:
+
+| Pool | Endpoint | Works? | Notes |
+|---|---|---|---|
+| solo.ckpool | `solo.ckpool.org:3333` | Yes | Sets its own difficulty |
+| Kryptex (BCH solo) | `bch-us.kryptex.network:7015` | Yes | Username is `solo:<bch-address>.<worker>` |
+| public-pool.io | `public-pool.io:21496` | Yes | Enforces a difficulty floor — set `startdiff` (below) |
+| Parasite | `parasite.wtf:42069` | Yes | Sets its own difficulty |
+| OCEAN | `mine.ocean.xyz:3334` | Not yet | Rejects version-rolled shares it hasn't negotiated (`H-not-zero`) |
+| Stratum V2 pools (e.g. DEMAND) | — | No | The proxy speaks Stratum V1; an SV2 pool needs a V1↔V2 translator in front |
+
+**Rule of thumb:** any pool that accepts a normal V1 miner (BitAxe, Antminer) works.
+The exceptions are **OCEAN**, which requires ASICBoost version-rolling to be
+negotiated up front (planned), and **Stratum V2-only pools**, which a V1 proxy can't
+talk to.
+
+### Setting the starting difficulty (`startdiff`)
+
+**Most pools set the difficulty for you** — leave `startdiff` unset and the pool's
+own difficulty takes over within a few seconds of connecting. You only need
+`startdiff` when a pool enforces a **minimum difficulty** and rejects anything lower.
+The clearest example is **public-pool.io**, whose floor is **100000**:
+
+```json
+{ "url": "public-pool.io:21496", "user": "bc1qYourAddress.worker", "pass": "x",
+  "startdiff": 100000, "mindiff": 100000 }
+```
+
+Without it, public-pool.io rejects every share as *"Difficulty too low"* and your
+worker looks dead at the pool.
+
+### Suggested `startdiff` by miner hashrate
+
+If you do need to set a difficulty — a pool with a floor, or you just want a sensible
+starting point — pick roughly by hashrate. These target about one submitted share
+every 10–15 seconds (responsive without spamming):
+
+| Miner hashrate | Typical hardware | Suggested `startdiff` |
+|---|---|---|
+| ~0.5 TH/s | BitAxe (BM1366), NerdAxe | `1000` |
+| ~1–1.3 TH/s | BitAxe Gamma (BM1370) | `3000` |
+| ~2–4.5 TH/s | NerdQAxe++ | `8000` |
+| ~13 TH/s | Antminer S9 | `40000` |
+| ~50 TH/s | mid-range ASIC | `150000` |
+| ~100 TH/s | Antminer S19 / Whatsminer | `350000` |
+
+Two things to keep in mind:
+
+- **The pool's own floor wins.** For public-pool.io use at least **100000** even on a
+  small BitAxe — its shares just arrive less often (that's the pool's design). In
+  general, set `startdiff` to the *higher* of the pool's floor and the value above.
+- **`startdiff` is per pool, not per miner.** In farm-split it applies to every miner
+  that lands on that pool, so if miners of different sizes share it, size `startdiff`
+  for the largest one. From there the pool's difficulty adjustment takes over.
+
+---
+
 ## Failover (per pool)
 
 Add a `failover` block to a pool and its `ckproxy` will automatically switch to
