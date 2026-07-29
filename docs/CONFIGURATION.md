@@ -174,7 +174,10 @@ Two things to keep in mind:
 
 Add a `failover` block to a pool and its `ckproxy` will automatically switch to
 the backup upstream if the primary dies — independently for each pool. This is
-**inside** one pool (primary → backup).
+**inside** one pool (primary → backup). You can set it either in `config.json` (the
+`failover` block per pool) or from the **dashboard** (the "Fallback URL / User"
+fields under each pool); the fallback reuses that pool's password. Leave the
+fallback URL blank for no fallback.
 
 Separately, Dual-Pool Proxy does **pool-level failover**: if a whole pool (both its
 endpoints) becomes unreachable — or stops sending work for 90s while it has
@@ -187,10 +190,11 @@ traffic when the pool recovers. Nothing to configure; it's always on.
 ## Dashboard, API & metrics
 
 - **Dashboard:** `http://<host>:8080` — live status + a settings form that edits
-  the pools, ratio, and mode and **writes them to `config.json`**. A **ratio**
-  change applies instantly with no miner disconnects; **mode**, **interval**, and
-  **pool/credential** changes are saved and take effect after a restart. Leave a
-  password field **blank to keep** the current password.
+  the pools (incl. each pool's **fallback**), ratio, and mode and **writes them to
+  `config.json`**. A **ratio** change applies instantly with no miner disconnects;
+  **mode**, **interval**, and **pool/credential/fallback** changes are saved and
+  take effect after a restart. The form won't overwrite a field while you're
+  editing it, and a password field left **blank keeps** the current password.
 - **REST:** `GET /api/status` (JSON), `POST /api/config`
   (`{ratio_a, mode, interval_ms, pools:[{url,user,pass}]}` — any subset).
 - **Prometheus:** `GET /metrics` — import

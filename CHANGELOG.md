@@ -15,11 +15,16 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ---
 
-## X.3.5 — Hardening & robustness
+## X.3.5 — Hardening, robustness & dashboard fixes
 
-Small, non-behavioral fixes on top of X.3, from a full code audit. No config or
-usage changes.
+Fixes on top of X.3, from a full code audit plus real-world dashboard use.
 
+- **Dashboard — edits no longer revert:** the settings form used to reload every 5s
+  and wipe whatever you were typing before you could hit Save. It now pauses syncing
+  a field while you're editing it and resumes after Save or Reload, so you can edit
+  pools/users from the dashboard *or* the config file, whichever you prefer.
+- **Dashboard — fallback pool editing:** you can now set each pool's optional
+  **fallback pool** (backup URL/user) from the dashboard, not just the config file.
 - **Supervisor:** a died ckproxy is now reaped and respawned without blocking the
   other pool — a long backoff on one pool no longer delays recovering the other.
 - **Connection teardown:** a closing miner's slot is freed before its socket is

@@ -541,6 +541,10 @@ static char *build_status_json(void)
         json_object_set_new(p, "state", json_string(up[i] ? "on" : "off"));
         json_object_set_new(p, "url",  json_string(cfg.pools[i].primary.url));
         json_object_set_new(p, "user", json_string(cfg.pools[i].primary.user));
+        if (cfg.pools[i].has_failover) {   /* so the dashboard form can show/edit it */
+            json_object_set_new(p, "failover_url",  json_string(cfg.pools[i].failover.url));
+            json_object_set_new(p, "failover_user", json_string(cfg.pools[i].failover.user));
+        }
         json_object_set_new(p, "connected", json_integer(connected[i]));   /* live */
         json_object_set_new(p, "routed", json_integer((json_int_t)r[i]));   /* cumulative */
         char hr[48];
@@ -636,6 +640,23 @@ static int apply_config_json(const char *body)
             if (pass && *pass) snprintf(P->primary.pass, sizeof(P->primary.pass), "%s", pass);
             if (cm && (!strcmp(cm, "proxy") || !strcmp(cm, "userproxy")))
                 snprintf(P->ckproxy_mode, sizeof(P->ckproxy_mode), "%s", cm);
+            /* Fallback pool (optional). The dashboard sends failover:{url,user};
+             * a non-empty url sets it, an empty url clears it, absent leaves it. */
+            json_t *foj = json_object_get(pj, "failover");
+            if (foj && json_is_object(foj)) {
+                const char *fu  = json_string_value(json_object_get(foj, "url"));
+                const char *fus = json_string_value(json_object_get(foj, "user"));
+                if (fu && *fu) {
+                    P->has_failover = true;
+                    snprintf(P->failover.url,  sizeof(P->failover.url),  "%s", fu);
+                    snprintf(P->failover.user, sizeof(P->failover.user), "%s",
+                             (fus && *fus) ? fus : P->primary.user);
+                    snprintf(P->failover.pass, sizeof(P->failover.pass), "%s",
+                             *P->primary.pass ? P->primary.pass : "x");
+                } else {
+                    P->has_failover = false;
+                }
+            }
         }
     }
     /* Persist while still holding the lock so the written file is a consistent

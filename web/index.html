@@ -191,6 +191,10 @@
           <input type="text" id="a_user" placeholder="bc1q…A.worker1">
           <label>Pool A — Password</label>
           <input type="password" id="a_pass" placeholder="leave blank to keep current">
+          <label>Pool A — Fallback URL (optional)</label>
+          <input type="text" id="a_fo_url" placeholder="backupA.example.com:3333 — blank = none">
+          <label>Pool A — Fallback User (optional)</label>
+          <input type="text" id="a_fo_user" placeholder="blank = same as Pool A user">
         </div>
         <div>
           <label>Pool B — URL (host:port)</label>
@@ -199,6 +203,10 @@
           <input type="text" id="b_user" placeholder="bc1q…B.worker1">
           <label>Pool B — Password</label>
           <input type="password" id="b_pass" placeholder="leave blank to keep current">
+          <label>Pool B — Fallback URL (optional)</label>
+          <input type="text" id="b_fo_url" placeholder="backupB.example.com:3333 — blank = none">
+          <label>Pool B — Fallback User (optional)</label>
+          <input type="text" id="b_fo_user" placeholder="blank = same as Pool B user">
         </div>
       </div>
 
@@ -225,8 +233,8 @@
 
       <div class="actions">
         <button type="submit"><span>Save &amp; apply</span></button>
-        <button type="button" class="ghost" onclick="loadStatus()"><span>Reload</span></button>
-        <span class="savenote" id="saveNote">Ratio &amp; mode apply instantly (no miner drops). Pool/credential changes are saved and take effect after a container restart.</span>
+        <button type="button" class="ghost" onclick="formDirty=false;loadStatus()"><span>Reload</span></button>
+        <span class="savenote" id="saveNote">Ratio applies instantly (no miner drops). Mode, interval, and pool/fallback changes are saved and take effect after a container restart.</span>
       </div>
     </form>
   </div>
@@ -303,12 +311,17 @@ function render(d){
       <td class="mono">${m.accepted}</td><td class="mono">${m.rejected}</td>
       <td class="mono">${esc(m.since)}</td></tr>`).join('');
 
-  // settings form
-  const p = d.pools;
-  a_url.value=p[0].url; a_user.value=p[0].user;
-  b_url.value=p[1].url; b_user.value=p[1].user;
-  ratio.value=d.ratio_a; onRatio(d.ratio_a);
-  mode.value=d.mode; interval_ms.value=d.interval_ms; onMode();
+  // settings form — only sync from the server while the user is NOT editing, so a
+  // background refresh can't revert an in-progress change before "Save & apply".
+  if(!formDirty){
+    const p = d.pools;
+    a_url.value=p[0].url; a_user.value=p[0].user;
+    b_url.value=p[1].url; b_user.value=p[1].user;
+    a_fo_url.value=p[0].failover_url||''; a_fo_user.value=p[0].failover_user||'';
+    b_fo_url.value=p[1].failover_url||''; b_fo_user.value=p[1].failover_user||'';
+    ratio.value=d.ratio_a; onRatio(d.ratio_a);
+    mode.value=d.mode; interval_ms.value=d.interval_ms; onMode();
+  }
 }
 
 function onRatio(v){v=+v;
@@ -341,16 +354,19 @@ async function loadStatus(){
 async function saveConfig(ev){
   ev.preventDefault();
   const body={ ratio_a:+ratio.value, mode:mode.value, interval_ms:+interval_ms.value,
-    pools:[{url:a_url.value,user:a_user.value,pass:a_pass.value},
-           {url:b_url.value,user:b_user.value,pass:b_pass.value}]};
+    pools:[{url:a_url.value,user:a_user.value,pass:a_pass.value,
+            failover:{url:a_fo_url.value.trim(),user:a_fo_user.value.trim()}},
+           {url:b_url.value,user:b_user.value,pass:b_pass.value,
+            failover:{url:b_fo_url.value.trim(),user:b_fo_user.value.trim()}}]};
   const note=document.getElementById('saveNote');
   try{
     const r=await fetch('/api/config',{method:'POST',
       headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
       body:JSON.stringify(body)});
     if(r.ok){
-      note.textContent='Saved. Ratio & mode applied now; pool changes apply after a restart.';
+      note.textContent='Saved. Ratio applies now; mode, interval, and pool/fallback changes take effect after a restart.';
       a_pass.value=''; b_pass.value='';   // blank = keep current password
+      formDirty=false;                    // saved — let the form resume syncing
       loadStatus();
     }else{
       note.textContent='Save failed ('+r.status+').';
@@ -358,6 +374,10 @@ async function saveConfig(ev){
   }catch(e){ note.textContent='Preview mode — save is disabled (no backend).'; }
   return false;
 }
+// While you're editing the settings form, pause syncing those fields from the 5s
+// refresh so a poll can't revert your change before you hit Save. Reload/Save clears it.
+let formDirty=false;
+document.getElementById('cfgForm').addEventListener('input', ()=>{ formDirty=true; });
 loadStatus();
 setInterval(loadStatus, 5000);
 </script>
