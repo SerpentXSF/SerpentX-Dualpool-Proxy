@@ -7,6 +7,7 @@ LDFLAGS  ?= -lpthread -lm -ljansson
 DP       = src/dual_pool
 SPLITTER_SRC = src/splitter.c src/relay.c src/alloc.c src/share_accounting.c \
                src/config.c src/ckproxy_config.c src/health.c src/webui.c \
+               src/stratum_msg.c src/split_sched.c src/splitmux.c \
                $(DP)/pool_scheduler.c $(DP)/pool_failover.c $(DP)/dual_clamp.c
 
 dualpool-splitter: $(SPLITTER_SRC)
