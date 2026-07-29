@@ -223,11 +223,21 @@
           <select id="mode" onchange="onMode()">
             <option value="farm_split">farm_split — split miners across pools (fleets)</option>
             <option value="time_slice">time_slice — split one miner over time (single)</option>
+            <option value="hashrate_split">hashrate_split — split ONE miner across both pools (single, no reflash)</option>
           </select>
         </div>
         <div id="intervalWrap" style="display:none">
           <label>Time-slice interval (ms)</label>
           <input type="text" id="interval_ms" value="180000">
+        </div>
+        <div id="hsplitWrap" style="display:none">
+          <label>Target shares / slice</label>
+          <input type="text" id="target_shares" value="10">
+          <label>Min slice (s)</label>
+          <input type="text" id="min_slice_s" value="10">
+          <label>Max slice (s)</label>
+          <input type="text" id="max_slice_s" value="120">
+          <div class="savenote">Shares per slice, and the min/max seconds a slice may run before swapping pools.</div>
         </div>
       </div>
 
@@ -252,6 +262,7 @@ const DEMO = {
   version:"X.3.5",
   service:{online:true, stratum_port:3333},
   ratio_a:70, mode:"farm_split", interval_ms:180000,
+  target_shares:10, min_slice_s:10, max_slice_s:120,
   actual:{a:66.7, b:33.3},
   pools:[
     {id:"A", name:"Pool A", state:"on", url:"solo.ckpool.org:3333",
@@ -320,15 +331,20 @@ function render(d){
     a_fo_url.value=p[0].failover_url||''; a_fo_user.value=p[0].failover_user||'';
     b_fo_url.value=p[1].failover_url||''; b_fo_user.value=p[1].failover_user||'';
     ratio.value=d.ratio_a; onRatio(d.ratio_a);
-    mode.value=d.mode; interval_ms.value=d.interval_ms; onMode();
+    mode.value=d.mode; interval_ms.value=d.interval_ms;
+    target_shares.value=d.target_shares ?? 10;
+    min_slice_s.value=d.min_slice_s ?? 10;
+    max_slice_s.value=d.max_slice_s ?? 120;
+    onMode();
   }
 }
 
 function onRatio(v){v=+v;
   document.getElementById('rA').textContent=v+'% A';
   document.getElementById('rB').textContent=(100-v)+'% B';}
-function onMode(){document.getElementById('intervalWrap').style.display=
-  document.getElementById('mode').value==='time_slice'?'block':'none';}
+function onMode(){const m=document.getElementById('mode').value;
+  document.getElementById('intervalWrap').style.display=m==='time_slice'?'block':'none';
+  document.getElementById('hsplitWrap').style.display=m==='hashrate_split'?'block':'none';}
 
 // Optional dashboard key (only needed if the proxy was started with web_password).
 function authHeaders(){
@@ -354,6 +370,7 @@ async function loadStatus(){
 async function saveConfig(ev){
   ev.preventDefault();
   const body={ ratio_a:+ratio.value, mode:mode.value, interval_ms:+interval_ms.value,
+    target_shares:+target_shares.value, min_slice_s:+min_slice_s.value, max_slice_s:+max_slice_s.value,
     pools:[{url:a_url.value,user:a_user.value,pass:a_pass.value,
             failover:{url:a_fo_url.value.trim(),user:a_fo_user.value.trim()}},
            {url:b_url.value,user:b_user.value,pass:b_pass.value,

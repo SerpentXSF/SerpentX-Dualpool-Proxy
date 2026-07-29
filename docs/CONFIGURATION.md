@@ -14,6 +14,9 @@ This page documents every option and how to tune it.
   "mode": "farm_split",
   "ratio_a": 70,
   "interval_ms": 180000,
+  "target_shares": 10,
+  "min_slice_s": 10,
+  "max_slice_s": 120,
   "web_password": "",
   "pools": [
     { "url": "poolA:3333", "user": "walletA.worker", "pass": "x",
@@ -29,9 +32,12 @@ This page documents every option and how to tune it.
 |---|---|---|
 | `downstream.stratum_port` | Port miners connect to | `3333` |
 | `downstream.web_port` | Dashboard / API port | `8080` |
-| `mode` | `farm_split` or `time_slice` | `farm_split` |
+| `mode` | `farm_split`, `time_slice`, or `hashrate_split` | `farm_split` |
 | `ratio_a` | Percent of hashrate to Pool A (0–100) | `50` |
 | `interval_ms` | Time-slice slice length (ms), 1000–3600000 | `180000` |
+| `target_shares` | `hashrate_split`: shares per slice before swapping pools, 1–1000 | `10` |
+| `min_slice_s` | `hashrate_split`: minimum slice length (s), 1–3600 | `10` |
+| `max_slice_s` | `hashrate_split`: maximum slice length (s), 1–3600 | `120` |
 | `web_password` | If set, dashboard/API/metrics require this key | `""` (off) |
 | `pools[]` | Exactly **two** pool entries | — |
 | `pools[].url` | Pool `host:port` | required |
@@ -82,16 +88,63 @@ The dashboard shows **actual vs target** so you can see the realized split.
 
 ## Choosing the mode
 
-| | `farm_split` (default) | `time_slice` |
-|---|---|---|
-| Best for | 2+ miners / a farm | a single miner |
-| How | each miner pinned to one pool | one miner recycled between pools every `interval_ms` |
-| Switching loss | none | a few stale shares per boundary |
-| `interval_ms` | ignored | use **minutes** (e.g. `180000` = 3 min) |
+| | `farm_split` (default) | `time_slice` | `hashrate_split` |
+|---|---|---|---|
+| Best for | 2+ miners / a farm | a single miner | a single miner you want on **both** pools **at once** |
+| How | each miner pinned to one pool | one miner recycled between pools every `interval_ms` | the proxy time-slices the miner across pools via a Stratum-aware multiplexer |
+| Switching loss | none | a few stale shares per boundary | minimal — adaptive slices on clean-job boundaries |
+| `interval_ms` | ignored | use **minutes** (e.g. `180000` = 3 min) | ignored |
+| `target_shares`/`min_slice_s`/`max_slice_s` | ignored | ignored | used (see below) |
 
 Don't use `time_slice` for a farm — it recycles *all* connections at each
 boundary. It exists specifically to give a lone miner a dual-pool split that no
 stock firmware offers.
+
+---
+
+## `hashrate_split` mode
+
+`hashrate_split` puts a **single miner on both pools at the same time**, the way
+some dual-pool BitAxe/NerdQAxe firmware works — but without reflashing anything.
+The miner connects once, to the proxy; internally, the proxy multiplexes it
+across upstream connections to Pool A and Pool B, swapping which pool it's
+mining for at slice boundaries so its shares land on both according to `ratio_a`.
+
+**Knobs:**
+
+- `target_shares` — roughly how many shares to collect before considering a
+  slice "done" (a proxy for slice length that adapts to the miner's actual
+  hashrate, instead of a fixed wall-clock timer).
+- `min_slice_s` / `max_slice_s` — hard floor/ceiling (seconds) on slice length,
+  so a slow miner isn't swapped too often and a fast one isn't stuck too long.
+
+**How the pool swap happens:** on a miner that honors `mining.set_extranonce`,
+the proxy swaps the miner onto the new pool's job stream in place — smooth, no
+reconnect. For a miner that doesn't support `set_extranonce`, the proxy
+**automatically falls back to reconnect-slicing**: it still splits the miner
+across both pools, just with a brief reconnect at each swap instead of an
+in-place handoff.
+
+Like mode/interval, `hashrate_split`'s knobs are **restart-applied** — changing
+them via the dashboard or `config.json` takes effect on the next restart (only
+`ratio_a` hot-applies without one).
+
+### Known limitations (first release)
+
+- **Dashboard accounting gap:** a `hashrate_split` miner's shares are submitted
+  to, and credited by, the pools themselves — but this proxy's own
+  dashboard/API share tally does **not yet** count shares from a split
+  connection (its per-miner/per-pool rows read `0`). Verify your shares are
+  landing by checking **the pool's own dashboard**, not this one, until this is
+  fixed.
+- **Reduced 90s no-work auto-donation:** normally, if a pool sends no work for
+  90 seconds while it has miners, Dual-Pool Proxy evicts those miners onto the
+  healthy pool (see [Failover](#failover-per-pool)). For a pool that's only
+  serving `hashrate_split` connections, this auto-donation is weaker, because
+  the mux mitigates the same failure itself: it self-heals by degrading the
+  split miner onto the single healthy pool rather than waiting on the proxy's
+  eviction path. In practice you're still protected, just via a different
+  mechanism than the one documented above.
 
 ---
 
@@ -190,13 +243,16 @@ traffic when the pool recovers. Nothing to configure; it's always on.
 ## Dashboard, API & metrics
 
 - **Dashboard:** `http://<host>:8080` — live status + a settings form that edits
-  the pools (incl. each pool's **fallback**), ratio, and mode and **writes them to
-  `config.json`**. A **ratio** change applies instantly with no miner disconnects;
-  **mode**, **interval**, and **pool/credential/fallback** changes are saved and
-  take effect after a restart. The form won't overwrite a field while you're
-  editing it, and a password field left **blank keeps** the current password.
+  the pools (incl. each pool's **fallback**), ratio, mode, and (for
+  `hashrate_split`) `target_shares`/`min_slice_s`/`max_slice_s`, and **writes them
+  to `config.json`**. A **ratio** change applies instantly with no miner
+  disconnects; **mode**, **interval**, **hashrate_split knobs**, and
+  **pool/credential/fallback** changes are saved and take effect after a restart.
+  The form won't overwrite a field while you're editing it, and a password field
+  left **blank keeps** the current password.
 - **REST:** `GET /api/status` (JSON), `POST /api/config`
-  (`{ratio_a, mode, interval_ms, pools:[{url,user,pass}]}` — any subset).
+  (`{ratio_a, mode, interval_ms, target_shares, min_slice_s, max_slice_s,
+  pools:[{url,user,pass}]}` — any subset).
 - **Prometheus:** `GET /metrics` — import
   [`grafana/dualpool-dashboard.json`](../grafana/dualpool-dashboard.json).
 - **Password:** set `web_password` (or `WEB_PASSWORD`). Then `/api/*` and
@@ -223,7 +279,8 @@ dashboard edits). For day-to-day changes, use the dashboard or edit `config.json
 
 - **Ratio** → applies **instantly** from the dashboard (or `docker kill -s HUP
   dualpool-proxy` after editing `config.json`), without dropping miners.
-- **Mode / interval** → saved immediately, take effect on `docker compose restart
+- **Mode / interval / hashrate_split knobs** (`target_shares`, `min_slice_s`,
+  `max_slice_s`) → saved immediately, take effect on `docker compose restart
   dualpool-proxy`.
 - **Pool URLs / usernames / passwords** → saved immediately, take effect on
   `docker compose restart dualpool-proxy` (a pool swap reconnects the miners on it).

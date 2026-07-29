@@ -448,6 +448,12 @@ static void persist_config(void)
     json_object_set_new(root, "ratio_a", json_integer(g_cfg.ratio_a));
     json_object_set_new(root, "mode", json_string(g_cfg.mode));
     json_object_set_new(root, "interval_ms", json_integer(g_cfg.interval_ms));
+    /* hashrate_split slice knobs; preserved the same way startdiff/mindiff are
+     * below, so a dashboard save (e.g. of an unrelated field) doesn't silently
+     * revert these to the compiled-in defaults. */
+    json_object_set_new(root, "target_shares", json_integer(g_cfg.target_shares));
+    json_object_set_new(root, "min_slice_s", json_integer(g_cfg.min_slice_s));
+    json_object_set_new(root, "max_slice_s", json_integer(g_cfg.max_slice_s));
 
     json_t *pools = json_array();
     for (int i = 0; i < 2; i++) {
@@ -610,6 +616,9 @@ static char *build_status_json(void)
     json_object_set_new(root, "mode", json_string(cfg.mode));
     json_object_set_new(root, "ratio_a", json_integer(ratio));
     json_object_set_new(root, "interval_ms", json_integer(cfg.interval_ms));
+    json_object_set_new(root, "target_shares", json_integer(cfg.target_shares));
+    json_object_set_new(root, "min_slice_s", json_integer(cfg.min_slice_s));
+    json_object_set_new(root, "max_slice_s", json_integer(cfg.max_slice_s));
 
     /* actual split from currently-connected miners (falls back to target). */
     double ctot = (double)(connected[0] + connected[1]);
@@ -689,6 +698,9 @@ static int apply_config_json(const char *body)
     json_t *r = json_object_get(m, "ratio_a");
     json_t *mode = json_object_get(m, "mode");
     json_t *iv = json_object_get(m, "interval_ms");
+    json_t *ts = json_object_get(m, "target_shares");
+    json_t *mns = json_object_get(m, "min_slice_s");
+    json_t *mxs = json_object_get(m, "max_slice_s");
     json_t *pools = json_object_get(m, "pools");
 
     pthread_mutex_lock(&g_alloc_lock);
@@ -699,13 +711,27 @@ static int apply_config_json(const char *body)
     }
     if (json_is_string(mode)) {
         const char *mv = json_string_value(mode);
-        if (!strcmp(mv, "farm_split") || !strcmp(mv, "time_slice"))
+        if (!strcmp(mv, "farm_split") || !strcmp(mv, "time_slice") ||
+            !strcmp(mv, "hashrate_split"))
             snprintf(g_cfg.mode, sizeof(g_cfg.mode), "%s", mv);
     }
     if (json_is_integer(iv)) {
         int v = (int)json_integer_value(iv);
         if (v < 1000) v = 1000; else if (v > 3600000) v = 3600000;
         g_cfg.interval_ms = v;
+    }
+    /* hashrate_split slice knobs: only touch what the dashboard actually sent,
+     * clamped together (same rule as the CLI/config-file path) so a partial
+     * POST can't leave an inverted min/max pair on disk. Restart-applied,
+     * like mode/interval above — not hot-swapped into the running splitmux. */
+    if (json_is_integer(ts) || json_is_integer(mns) || json_is_integer(mxs)) {
+        int t  = json_is_integer(ts)  ? (int)json_integer_value(ts)  : g_cfg.target_shares;
+        int mn = json_is_integer(mns) ? (int)json_integer_value(mns) : g_cfg.min_slice_s;
+        int mx = json_is_integer(mxs) ? (int)json_integer_value(mxs) : g_cfg.max_slice_s;
+        config_clamp_slice_knobs(&t, &mn, &mx);
+        g_cfg.target_shares = t;
+        g_cfg.min_slice_s   = mn;
+        g_cfg.max_slice_s   = mx;
     }
     /* Pool fields: update url/user/ckproxy_mode; update pass ONLY if provided
      * (the form leaves it blank to keep the current password). Saved to disk;

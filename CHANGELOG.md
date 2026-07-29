@@ -15,6 +15,27 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ---
 
+## Unreleased
+
+- **New mode — `hashrate_split`:** a single miner can now mine **both pools at
+  once**, the way some dual-pool BitAxe/NerdQAxe firmware works, but without
+  reflashing — the proxy multiplexes one downstream connection across both
+  upstreams and time-slices it by share count (`target_shares`, clamped between
+  `min_slice_s`/`max_slice_s`). Miners that honor `mining.set_extranonce` get a
+  smooth in-place pool swap; others automatically fall back to a brief
+  reconnect per slice. Selectable from the **dashboard** (new mode option +
+  knob fields) or `config.json`, with full config-API round-trip
+  (`POST /api/config` accepts and persists `target_shares`/`min_slice_s`/
+  `max_slice_s`, `GET /api/status` reports them back). Like other mode/knob
+  changes, it's restart-applied.
+  Known limitations of this first release: split-connection shares are
+  credited at the pools but not yet counted in this proxy's own dashboard
+  tally (verify on the pool's own dashboard); and the 90s no-work
+  auto-donation is reduced for pools serving only split connections, mitigated
+  by the mux's own single-pool degrade. See
+  [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#hashrate_split-mode) for
+  details.
+
 ## X.3.5 — Hardening, robustness & dashboard fixes
 
 Fixes on top of X.3, from a full code audit plus real-world dashboard use.
