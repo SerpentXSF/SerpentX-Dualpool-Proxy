@@ -145,6 +145,22 @@ typedef struct {
     char        pass[128];       /* miner's password, ditto */
     const char *up_addr[2];      /* "host:port" per pool, for secondary reconnect */
 
+    /* ASICBoost version-rolling negotiation (mining.configure / BIP310).
+     * The miner negotiates a version-rolling mask with the PRIMARY pool; the mux
+     * relays the pool's REAL granted mask back to the miner (not {}). The
+     * SECONDARY negotiates the same configure; if it grants a narrower mask the
+     * mux tells the miner mining.set_version_mask with the AND-intersection so a
+     * rolled share is valid on BOTH pools. */
+    bool        miner_vroll;         /* miner sent mining.configure (version-rolling) */
+    uint32_t    miner_vmask_req;     /* mask the miner requested */
+    char        miner_cfg[SPLITMUX_LINE]; /* raw miner configure line (replayed to sec) */
+    bool        vmask_active;        /* version-rolling was granted to the miner */
+    uint32_t    vmask;               /* mask currently advertised to the miner */
+    int         vmask_pool;          /* pool whose grant the miner was told (-1 none) */
+    bool        sec_vroll_seen;      /* secondary returned a configure result */
+    uint32_t    sec_vmask;           /* secondary's granted mask (0 = declined) */
+    bool        sec_vmask_applied;   /* reconciled sec grant into set_version_mask */
+
     linebuf_t bmin;              /* miner  -> mux */
     linebuf_t bup[2];            /* upstream[p] -> mux */
 } mux_t;
@@ -190,6 +206,100 @@ static void smx_dbg(const char *fmt, ...)
     fputs("[smux    ] ", stderr);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+}
+
+/* ---- ASICBoost version-rolling (mining.configure) helpers ---------------- */
+
+/* Test-only negative control (SPLITMUX_VROLL_OFF=1, one cached getenv): revert
+ * to the OLD broken behaviour — answer the miner's mining.configure with {} and
+ * never relay the pool's granted mask. Lets one binary demonstrate the RED
+ * (rejects) vs GREEN (accepted) split-vroll behaviour. Unset in production. */
+static int smx_vroll_off(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("SPLITMUX_VROLL_OFF");
+        /* Treat unset, empty, and "0" all as OFF-disabled (so an empty export
+         * from a test wrapper does not accidentally revert the relay). */
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Parse a version-rolling mask "1fffe000" (hex, optional 0x) into *out. Returns
+ * true iff the whole string is valid hex. */
+static bool vmask_parse(const char *hex, uint32_t *out)
+{
+    if (!hex || !*hex)
+        return false;
+    if (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X'))
+        hex += 2;
+    if (!*hex)
+        return false;
+    char *end = NULL;
+    unsigned long v = strtoul(hex, &end, 16);
+    if (!end || *end)
+        return false;
+    *out = (uint32_t)v;
+    return true;
+}
+
+/* Parse the miner's mining.configure request. params = [ [ext...], {args} ].
+ * Returns true iff "version-rolling" is requested; sets *reqmask to the
+ * requested mask (0xffffffff if the extension is present without an explicit
+ * mask). */
+static bool cfg_request_parse(const char *line, uint32_t *reqmask)
+{
+    *reqmask = 0xffffffffu;
+    json_error_t e;
+    json_t *r = json_loads(line, 0, &e);
+    if (!r)
+        return false;
+    bool wants = false;
+    json_t *params = json_object_get(r, "params");
+    json_t *exts = json_array_get(params, 0);
+    if (json_is_array(exts)) {
+        size_t i, n = json_array_size(exts);
+        for (i = 0; i < n; i++) {
+            const char *s = json_string_value(json_array_get(exts, i));
+            if (s && !strcmp(s, "version-rolling"))
+                wants = true;
+        }
+    }
+    json_t *args = json_array_get(params, 1);
+    if (json_is_object(args)) {
+        const char *mv =
+            json_string_value(json_object_get(args, "version-rolling.mask"));
+        uint32_t m;
+        if (mv && vmask_parse(mv, &m))
+            *reqmask = m;
+    }
+    json_decref(r);
+    return wants;
+}
+
+/* Parse a pool's mining.configure RESULT. result = {"version-rolling":true,
+ * "version-rolling.mask":"1fffe000"}. Returns true iff version-rolling was
+ * granted; sets *mask to the granted mask (0 if granted without a mask). */
+static bool cfg_result_parse(const char *line, uint32_t *mask)
+{
+    *mask = 0;
+    json_error_t e;
+    json_t *r = json_loads(line, 0, &e);
+    if (!r)
+        return false;
+    bool granted = false;
+    json_t *res = json_object_get(r, "result");
+    if (json_is_object(res)) {
+        granted = json_is_true(json_object_get(res, "version-rolling"));
+        const char *mv =
+            json_string_value(json_object_get(res, "version-rolling.mask"));
+        uint32_t m;
+        if (mv && vmask_parse(mv, &m))
+            *mask = m;
+    }
+    json_decref(r);
+    return granted;
 }
 
 /* Connect a fresh TCP socket to a "host:port" string (last colon splits). Used
@@ -557,6 +667,95 @@ static int read_subscribe_result(mux_t *m, int p)
     }
 }
 
+/* Answer the miner's mining.configure. granted => relay the real version-rolling
+ * mask; else {} (miner won't roll). Returns 0, or -1 on a miner write failure. */
+static int reply_configure_miner(mux_t *m, int64_t id, bool granted, uint32_t mask)
+{
+    char rep[256];
+    int rl;
+    if (granted)
+        rl = snprintf(rep, sizeof rep,
+            "{\"id\":%lld,\"result\":{\"version-rolling\":true,"
+            "\"version-rolling.mask\":\"%08x\"},\"error\":null}\n",
+            (long long)id, (unsigned)mask);
+    else
+        rl = snprintf(rep, sizeof rep,
+            "{\"id\":%lld,\"result\":{},\"error\":null}\n", (long long)id);
+    if (rl < 0 || (size_t)rl >= sizeof rep)
+        return -1;
+    if (write_all(m->down_fd, rep, (size_t)rl) < 0)
+        return -1;
+    smx_dbg_line("TX", -1, rep, (size_t)rl);
+    return 0;
+}
+
+/* Synchronously negotiate version-rolling with pool p: forward the miner's
+ * mining.configure under the sentinel id and read the pool's configure RESULT
+ * (tolerating an interleaved early set_difficulty/notify, which is captured).
+ * On a sentinel result sets *granted / *mask and returns 0; returns -1 if the
+ * pool dropped or never answered (timeout). */
+static int negotiate_configure_sync(mux_t *m, int p, const char *miner_line,
+                                    bool *granted, uint32_t *mask)
+{
+    *granted = false;
+    *mask = 0;
+    smx_dbg("configure: negotiating version-rolling with pool %c (sentinel id)\n",
+            p == 0 ? 'A' : 'B');
+    if (forward_with_id(m->pool[p].fd, miner_line, SENTINEL_CONFIGURE) < 0)
+        return -1;
+    char line[SPLITMUX_LINE];
+    size_t ll;
+    for (;;) {
+        if (!blocking_line(m->pool[p].fd, &m->bup[p], line, sizeof line, &ll))
+            return -1;                       /* EOF / handshake timeout */
+        smx_dbg_line("RX", p, line, ll);
+        json_error_t e;
+        json_t *r = json_loads(line, 0, &e);
+        if (!r)
+            continue;
+        json_t *idj = json_object_get(r, "id");
+        bool is_cfg = idj && json_is_integer(idj) &&
+                      json_integer_value(idj) == SENTINEL_CONFIGURE;
+        json_decref(r);
+        if (is_cfg) {
+            *granted = cfg_result_parse(line, mask);
+            smx_dbg("configure: pool %c %s mask=%08x\n", p == 0 ? 'A' : 'B',
+                    *granted ? "granted version-rolling" : "declined version-rolling",
+                    (unsigned)*mask);
+            return 0;
+        }
+        /* not our configure ack — an early set_difficulty/notify: keep its state */
+        pool_capture_state(m, p, line);
+    }
+}
+
+/* Intersect the miner's current version-rolling mask with `pool_mask`; if the
+ * pool covers less than what the miner already has, narrow the miner with a
+ * mining.set_version_mask (so a rolled share stays valid on BOTH pools) and
+ * adopt the intersection as the new advertised mask. No-op if version-rolling
+ * was never granted or the pool already covers the miner's mask. Returns 0, or
+ * -1 on a miner write failure. */
+static int reconcile_mask(mux_t *m, uint32_t pool_mask)
+{
+    if (!m->vmask_active)
+        return 0;
+    uint32_t inter = m->vmask & pool_mask;
+    if (inter == m->vmask)
+        return 0;                            /* pool covers all miner bits: nothing */
+    char buf[128];
+    int n = sm_emit_set_version_mask(buf, sizeof buf - 1, inter);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\n';
+    smx_dbg("vroll: narrowing miner mask %08x -> %08x (mining.set_version_mask)\n",
+            (unsigned)m->vmask, (unsigned)inter);
+    smx_dbg_line("TX", -1, buf, (size_t)n + 1);
+    if (write_all(m->down_fd, buf, (size_t)n + 1) < 0)
+        return -1;
+    m->vmask = inter;
+    return 0;
+}
+
 /* Synchronously bring up ONE pool (the PRIMARY) and reply to the miner from it.
  * Prefers `start_pool` (0/1) else A when ratio favours A; on the preferred
  * pool's subscribe failing, falls back to the other pool as primary. Reads the
@@ -588,17 +787,42 @@ static int primary_handshake(mux_t *m)
         if (stratum_msg_parse(line, &msg) != 0)
             continue;
         if (msg.type == SM_CONFIGURE) {
-            smx_dbg("primary: forwarding miner mining.configure to BOTH pools "
-                    "(sentinel id), answering miner {} verbatim\n");
-            if (forward_with_id(m->pool[0].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
-            if (forward_with_id(m->pool[1].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
-            char rep[128];
-            int rl = snprintf(rep, sizeof rep,
-                "{\"id\":%lld,\"result\":{},\"error\":null}\n",
-                (long long)msg.id);
-            if (rl < 0 || (size_t)rl >= sizeof rep) return -1;
-            if (write_all(m->down_fd, rep, (size_t)rl) < 0)
-                return -1;
+            /* Capture the miner's version-rolling request + the raw line (later
+             * replayed to the secondary during its async bring-up). */
+            m->miner_vroll = cfg_request_parse(line, &m->miner_vmask_req);
+            snprintf(m->miner_cfg, sizeof m->miner_cfg, "%s", line);
+
+            if (smx_vroll_off() || !m->miner_vroll) {
+                /* Test negative control, or a configure with no version-rolling:
+                 * forward to BOTH pools (sentinel) and answer {} as before. */
+                smx_dbg("primary: configure relay OFF/none — forwarding to BOTH "
+                        "pools, answering miner {}\n");
+                if (forward_with_id(m->pool[0].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
+                if (forward_with_id(m->pool[1].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
+                if (reply_configure_miner(m, msg.id, false, 0) < 0) return -1;
+                continue;
+            }
+
+            /* Negotiate version-rolling with the PREFERRED (likely primary) pool
+             * and relay its REAL granted mask to the miner. The secondary
+             * negotiates its own during async bring-up (reconciled later via
+             * mining.set_version_mask). */
+            bool granted = false;
+            uint32_t gmask = 0;
+            if (negotiate_configure_sync(m, pref, line, &granted, &gmask) == 0 &&
+                granted) {
+                m->vmask_active = true;
+                m->vmask = gmask;
+                m->vmask_pool = pref;
+                smx_dbg("primary: relaying pool %c granted mask %08x to miner\n",
+                        pref == 0 ? 'A' : 'B', (unsigned)gmask);
+                if (reply_configure_miner(m, msg.id, true, gmask) < 0) return -1;
+            } else {
+                /* pool declined or never answered: miner won't roll (still works,
+                 * just no ASICBoost). */
+                m->vmask_pool = -1;
+                if (reply_configure_miner(m, msg.id, false, 0) < 0) return -1;
+            }
             continue;
         }
         if (msg.type == SM_SUBSCRIBE) {
@@ -636,6 +860,27 @@ static int primary_handshake(mux_t *m)
             primary == 0 ? 'A' : 'B', m->pool[primary].enonce1,
             m->pool[primary].n2len);
 
+    /* If we fell back to a primary OTHER than the pool we negotiated the miner's
+     * version-rolling mask with, negotiate with the real primary and reconcile
+     * (narrow the miner if the primary grants less). */
+    if (m->vmask_active && !smx_vroll_off() && m->vmask_pool != primary) {
+        bool g2 = false;
+        uint32_t m2 = 0;
+        if (negotiate_configure_sync(m, primary, m->miner_cfg, &g2, &m2) == 0) {
+            if (reconcile_mask(m, g2 ? m2 : 0) < 0)
+                return -1;
+            m->vmask_pool = primary;
+        } else {
+            /* N2 fail-safe: the real primary never answered configure (timeout).
+             * The miner is currently rolling the mask a DIFFERENT pool granted, so
+             * narrow it to 0 (stop rolling) rather than submit a mask this pool
+             * never granted (which it would reject 100%). */
+            if (reconcile_mask(m, 0) < 0)
+                return -1;
+            m->vmask_pool = primary;
+        }
+    }
+
     /* 3. reply to the miner with the primary's session params */
     pool_t *ap = &m->pool[primary];
     char rep[512];
@@ -658,14 +903,27 @@ static int primary_handshake(mux_t *m)
         if (stratum_msg_parse(line, &msg) != 0)
             continue;
         if (msg.type == SM_CONFIGURE) {
-            if (forward_with_id(m->pool[primary].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
-            char cr[128];
-            int cl = snprintf(cr, sizeof cr,
-                "{\"id\":%lld,\"result\":{},\"error\":null}\n",
-                (long long)msg.id);
-            if (cl < 0 || (size_t)cl >= sizeof cr) return -1;
-            if (write_all(m->down_fd, cr, (size_t)cl) < 0)
-                return -1;
+            /* A configure arriving AFTER subscribe (uncommon, but tolerated).
+             * The primary is known now, so negotiate directly with it. */
+            m->miner_vroll = cfg_request_parse(line, &m->miner_vmask_req);
+            snprintf(m->miner_cfg, sizeof m->miner_cfg, "%s", line);
+            if (smx_vroll_off() || !m->miner_vroll) {
+                if (forward_with_id(m->pool[primary].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
+                if (reply_configure_miner(m, msg.id, false, 0) < 0) return -1;
+                continue;
+            }
+            bool granted = false;
+            uint32_t gmask = 0;
+            if (negotiate_configure_sync(m, primary, line, &granted, &gmask) == 0 &&
+                granted) {
+                m->vmask_active = true;
+                m->vmask = gmask;
+                m->vmask_pool = primary;
+                if (reply_configure_miner(m, msg.id, true, gmask) < 0) return -1;
+            } else {
+                m->vmask_pool = -1;
+                if (reply_configure_miner(m, msg.id, false, 0) < 0) return -1;
+            }
             continue;
         }
         if (msg.type == SM_EXTRANONCE_SUBSCRIBE) {
@@ -737,8 +995,17 @@ static int sec_send_handshake(mux_t *m)
     static const char sub[] =
         "{\"id\":90000001,\"method\":\"mining.subscribe\","
         "\"params\":[\"dualpool-mux/1.0\"]}\n";
-    smx_dbg("secondary(%c): sending pipelined subscribe+authorize\n",
-            m->sec == 0 ? 'A' : 'B');
+    smx_dbg("secondary(%c): sending pipelined %sconfigure+subscribe+authorize\n",
+            m->sec == 0 ? 'A' : 'B',
+            (m->miner_vroll && !smx_vroll_off()) ? "" : "(no-configure) ");
+    /* If the miner negotiated version-rolling, replay its mining.configure to
+     * the secondary too (sentinel id) so we learn THIS pool's granted mask and
+     * can reconcile it against the primary's via mining.set_version_mask. */
+    if (m->miner_vroll && !smx_vroll_off() && m->miner_cfg[0]) {
+        smx_dbg_line("TX", m->sec, m->miner_cfg, strlen(m->miner_cfg));
+        if (forward_with_id(fd, m->miner_cfg, SENTINEL_CONFIGURE) < 0)
+            return -1;
+    }
     smx_dbg_line("TX", m->sec, sub, sizeof sub - 1);
     if (write_all(fd, sub, sizeof sub - 1) < 0)
         return -1;
@@ -800,6 +1067,9 @@ static void sec_begin_attempt(mux_t *m, int64_t t)
     /* fresh per-attempt state */
     m->bup[p].len = 0; m->bup[p].scan = 0; m->bup[p].poison = false;
     m->sec_got_sub = false;
+    m->sec_vroll_seen = false;
+    m->sec_vmask = 0;
+    m->sec_vmask_applied = false;
     m->pool[p].last_notify_len = 0;
     m->pool[p].enonce1[0] = '\0';
     m->sec_state = SEC_HANDSHAKING;
@@ -820,6 +1090,22 @@ static int sec_handshake_line(mux_t *m, const char *line)
     if (!r)
         return 0;
     json_t *idj = json_object_get(r, "id");
+    if (idj && json_is_integer(idj) &&
+        json_integer_value(idj) == SENTINEL_CONFIGURE) {
+        /* the secondary's version-rolling grant (used to reconcile the mask) */
+        json_decref(r);
+        m->sec_vroll_seen = true;
+        m->sec_vmask = 0;
+        if (cfg_result_parse(line, &m->sec_vmask))
+            smx_dbg("secondary(%c): granted version-rolling mask %08x\n",
+                    p == 0 ? 'A' : 'B', (unsigned)m->sec_vmask);
+        else {
+            m->sec_vmask = 0;                  /* declined: no rolling on this pool */
+            smx_dbg("secondary(%c): declined version-rolling\n",
+                    p == 0 ? 'A' : 'B');
+        }
+        return 0;
+    }
     if (idj && json_is_integer(idj) &&
         json_integer_value(idj) == SENTINEL_SUBSCRIBE) {
         json_t *res = json_object_get(r, "result");
@@ -1157,6 +1443,21 @@ static int handle_pool_readable(mux_t *m, int p)
             m->sec_degrade_logged = false;
             fprintf(stderr, "splitmux: secondary pool %c ready\n",
                     m->sec == 0 ? 'A' : 'B');
+            /* Reconcile the secondary's version-rolling grant against the mask
+             * the miner is using: if the secondary grants less, narrow the miner
+             * (mining.set_version_mask with the AND-intersection) BEFORE any swap
+             * routes a rolled share to it. Runs once per successful bring-up. */
+            if (m->vmask_active && !m->sec_vmask_applied) {
+                m->sec_vmask_applied = true;
+                /* N2 fail-safe: configure precedes subscribe in the bring-up, so
+                 * if the secondary hasn't confirmed version-rolling by READY it
+                 * never answered configure — narrow the miner to 0 (stop rolling)
+                 * rather than route a rolled share to a pool that never granted a
+                 * mask. A pool that answered (grant or decline) carries its mask. */
+                uint32_t sm = m->sec_vroll_seen ? m->sec_vmask : 0;
+                if (reconcile_mask(m, sm) < 0)
+                    return -1;
+            }
             /* drain any lines already buffered past the first notify */
             if (process_lines(m, &m->bup[p], true, p) < 0)
                 return -1;
@@ -1303,6 +1604,7 @@ void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
     mux_t m;
     memset(&m, 0, sizeof m);
     m.down_fd = down_fd;
+    m.vmask_pool = -1;           /* no version-rolling grant negotiated yet */
     m.pool[0].fd = up_fd[0];
     m.pool[1].fd = up_fd[1];
     m.ratio_a = ratio_a;

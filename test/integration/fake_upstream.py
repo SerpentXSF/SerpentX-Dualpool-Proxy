@@ -6,6 +6,20 @@ one line per event to stdout (and optionally a file) so runners can count them:
     <TAG> conn               (a connection reached this pool)
     <TAG> notify job=<jobid> (this pool ISSUED that job to the mux)
     <TAG> share job=<jobid>  (a share was submitted to this pool, with its job)
+    <TAG> reject-version job=<jobid> (a share's rolled version left the granted
+                             ASICBoost version-rolling mask; see --vmask)
+
+ASICBoost version rolling (--vmask <hex>, e.g. 1fffe000, default OFF): when set,
+this pool GRANTS version-rolling on mining.configure — replying
+{"version-rolling": true, "version-rolling.mask": "<req & vmask>"} — and then
+VALIDATES every submit's 6th param (the rolled nVersion): any bit that differs
+from the job's base version (0x20000000) and lies OUTSIDE the granted mask is
+rejected with {"result": false, "error": "Invalid version"} and logged
+`reject-version`. A share submitted with a rolled version when version-rolling was
+never granted is likewise rejected. This models a real pool tightly enough to
+reject a miner that rolls a mask the pool did not grant (the exact failure the mux
+caused by answering mining.configure with {}). With --vmask unset, configure is
+answered {} and submits are accepted regardless of version (legacy behaviour).
 
 Each tag advertises a DISTINCT extranonce1 (A -> "aaaa0001", else "bbbb0001")
 so the mux can synthesize per-pool sessions and a runner can verify routing.
@@ -46,7 +60,10 @@ def logline(path, s):
 def enonce1_for(tag):
     return "aaaa0001" if tag == "A" else "bbbb0001"
 
-def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0):
+BASE_VERSION = 0x20000000   # nVersion the notify carries (params[5]); miners roll it
+
+def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
+           vmask=None):
     logline(logpath, f"{tag} conn")
     if ready_delay > 0 and (time.monotonic() - START) < ready_delay:
         # "not ready yet": for the first ready_delay seconds of PROCESS life,
@@ -95,6 +112,7 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0)
     en1 = enonce1_for(tag)
     slock = threading.Lock()
     seq = [0]
+    granted = [None]   # per-connection granted version-rolling mask (int), None = not granted
     stop = threading.Event()
     try:
         f = conn.makefile("rwb")
@@ -136,6 +154,25 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0)
                 send({"id": mid,
                       "result": [[["mining.notify", "ae6812eb"]], en1, 4],
                       "error": None})
+            elif m == "mining.configure":
+                # ASICBoost version-rolling negotiation. Grant only what BOTH the
+                # miner requested AND this pool's --vmask allows (their AND).
+                if vmask is None:
+                    send({"id": mid, "result": {}, "error": None})
+                else:
+                    params = msg.get("params") or []
+                    args = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
+                    req = 0xffffffff
+                    rm = args.get("version-rolling.mask")
+                    if isinstance(rm, str):
+                        try:
+                            req = int(rm, 16)
+                        except ValueError:
+                            req = 0xffffffff
+                    g = req & vmask
+                    granted[0] = g
+                    send({"id": mid, "result": {"version-rolling": True,
+                          "version-rolling.mask": f"{g:08x}"}, "error": None})
             elif m == "mining.authorize":
                 # Real ckproxy (userproxy) keys the upstream user on the authorize
                 # username and REJECTS an empty one ("Empty workername parameter").
@@ -150,6 +187,18 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0)
                 send({"id": mid, "result": True, "error": None})
                 send({"id": None, "method": "mining.set_difficulty",
                       "params": [1024]})
+                # A real version-rolling pool PUSHES the negotiated mask to its
+                # client via mining.set_version_mask. A ckpool proxy sitting in
+                # front of us relies on this to learn the upstream version_mask
+                # (else it logs "Json did not find entry version_mask" and rejects
+                # every rolled downstream share with "Invalid version mask"). Send
+                # it before the first job so the proxy is primed. In the pure mux
+                # harness the mux simply ignores this upstream notification.
+                if vmask is not None:
+                    if granted[0] is None:
+                        granted[0] = vmask
+                    send({"id": None, "method": "mining.set_version_mask",
+                          "params": [f"{vmask:08x}"]})
                 send(make_notify(True))              # first clean job
                 if interval > 0:                     # opt-in periodic fresh jobs
                     threading.Thread(target=notifier, daemon=True).start()
@@ -161,6 +210,22 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0)
                 # origin pool, but this extranonce1 does: it MUST equal this
                 # pool's own en1, else the share was cross-routed (FIX-3).
                 en = params[3] if len(params) > 3 else "?"
+                # ASICBoost version check (only when this pool enforces --vmask):
+                # params[5], if present, is the rolled nVersion. Any bit that
+                # differs from the base version and falls outside the granted mask
+                # (or ANY roll when version-rolling was never granted) is invalid.
+                if vmask is not None and len(params) > 5:
+                    try:
+                        ver = int(params[5], 16)
+                    except (ValueError, TypeError):
+                        ver = BASE_VERSION
+                    diff = (ver ^ BASE_VERSION) & 0xffffffff
+                    allowed = granted[0] if granted[0] is not None else 0
+                    if diff & ~allowed & 0xffffffff:
+                        logline(logpath, f"{tag} reject-version job={job}")
+                        send({"id": mid, "result": False,
+                              "error": [23, "Invalid version", None]})
+                        continue
                 logline(logpath, f"{tag} share job={job} en={en}")
                 send({"id": mid, "result": True, "error": None})
             elif mid is not None:
@@ -188,8 +253,13 @@ def main():
                     help="for the first N seconds of process life, reject "
                          "mining.subscribe with an error and close (simulates a "
                          "ckproxy that isn't ready yet); afterwards behave normally")
+    ap.add_argument("--vmask", default=None,
+                    help="hex ASICBoost version-rolling mask to GRANT on "
+                         "mining.configure and enforce on submits (e.g. 1fffe000); "
+                         "default OFF (configure answered {}, submits unchecked)")
     a = ap.parse_args()
     interval = a.notify_ms / 1000.0 if a.notify_ms > 0 else a.interval
+    vmask = int(a.vmask, 16) if a.vmask else None
 
     ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -212,7 +282,7 @@ def main():
             break               # listener closed via SIGUSR1
         threading.Thread(target=handle,
                          args=(conn, a.tag, a.log, interval, a.jobns, a.workless,
-                               a.ready_delay),
+                               a.ready_delay, vmask),
                          daemon=True).start()
 
     # keep the process (and its live handler threads) alive after we stop listening

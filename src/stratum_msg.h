@@ -35,4 +35,9 @@ int stratum_msg_parse(const char *line, stratum_msg_t *out);
 int sm_emit_set_extranonce(char *buf, size_t n, const char *enonce1, int n2len);
 int sm_emit_set_difficulty(char *buf, size_t n, double diff);
 
+/* Emit a mining.set_version_mask notification carrying `mask` as 8 lowercase hex
+ * digits (BIP310 ASICBoost version-rolling). Return bytes written, -1 on
+ * overflow. */
+int sm_emit_set_version_mask(char *buf, size_t n, uint32_t mask);
+
 #endif /* DUALPOOL_STRATUM_MSG_H */

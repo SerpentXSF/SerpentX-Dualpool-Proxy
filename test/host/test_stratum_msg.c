@@ -67,6 +67,19 @@ static void test_emit_set_difficulty(void){
     assert(m.diff==1000.0);
 }
 
+static void test_emit_set_version_mask(void){
+    char buf[256];
+    int n = sm_emit_set_version_mask(buf, sizeof buf, 0x1fffe000u);
+    assert(n > 0);
+    assert(strcmp(buf,
+        "{\"id\":null,\"method\":\"mining.set_version_mask\",\"params\":[\"1fffe000\"]}")==0);
+    /* zero mask (miner told to stop rolling) must still be 8 hex digits */
+    n = sm_emit_set_version_mask(buf, sizeof buf, 0u);
+    assert(n > 0);
+    assert(strcmp(buf,
+        "{\"id\":null,\"method\":\"mining.set_version_mask\",\"params\":[\"00000000\"]}")==0);
+}
+
 static void test_emit_overflow(void){
     char buf[8];
     int n = sm_emit_set_extranonce(buf, sizeof buf, "29cc886a", 8);
@@ -80,6 +93,7 @@ int main(void){
     test_parse_extranonce_subscribe();
     test_emit_set_extranonce();
     test_emit_set_difficulty();
+    test_emit_set_version_mask();
     test_emit_overflow();
     printf("stratum_msg: parse notify+submit, emit round-trips passed\n");
     return 0;

@@ -77,3 +77,12 @@ int sm_emit_set_difficulty(char *buf, size_t n, double diff)
     if (len < 0 || (size_t)len >= n) return -1;
     return len;
 }
+
+int sm_emit_set_version_mask(char *buf, size_t n, uint32_t mask)
+{
+    int len = snprintf(buf, n,
+        "{\"id\":null,\"method\":\"mining.set_version_mask\",\"params\":[\"%08x\"]}",
+        (unsigned)mask);
+    if (len < 0 || (size_t)len >= n) return -1;
+    return len;
+}
