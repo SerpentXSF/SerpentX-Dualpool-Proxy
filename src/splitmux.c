@@ -34,6 +34,8 @@
 
 #include <errno.h>
 #include <jansson.h>
+#include <netdb.h>
+#include <stdarg.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -58,12 +60,18 @@
 #define SENTINEL_AUTHORIZE  90000002LL
 #define SENTINEL_CONFIGURE  90000003LL
 
-/* dual_handshake outcomes. DH_DEGRADED means exactly one pool failed its
- * subscribe and the handshake has already handed the miner off to a single-pool
- * relay on the survivor (D1b): the caller must NOT run the dual swap loop. */
-#define DH_OK        0
-#define DH_FAIL     (-1)
-#define DH_DEGRADED  1
+/* Asynchronous secondary-pool bring-up. The PRIMARY pool is handshaked
+ * synchronously and the miner mines it at once; the SECONDARY is brought up by a
+ * non-blocking state machine driven from the main poll loop, so a pool that
+ * isn't ready the instant we subscribe (real ckproxy: "Temporarily insufficient
+ * proxies") never blocks the miner and is retried until it becomes ready. */
+#define SEC_HANDSHAKING  1   /* subscribe/authorize sent, awaiting result+notify */
+#define SEC_READY        2   /* enonce1/diff/notify captured — swaps may target it */
+#define SEC_WAIT         3   /* attempt failed; backing off before a reconnect */
+
+#define SEC_ATTEMPT_MS   8000     /* abort one bring-up attempt after this long */
+#define SEC_BACKOFF_MIN  3        /* first retry backoff (s) */
+#define SEC_BACKOFF_MAX  30       /* backoff cap (s) */
 
 /* Per-direction line-assembly buffer. */
 typedef struct {
@@ -125,6 +133,18 @@ typedef struct {
      * false => reconnect-slice fallback at the deadline. */
     bool     miner_ext_ok;
 
+    /* asynchronous secondary-pool bring-up (the pool that is NOT the primary) */
+    int         sec;             /* secondary pool index (0/1) */
+    int         sec_state;       /* SEC_HANDSHAKING / SEC_READY / SEC_WAIT */
+    bool        sec_got_sub;     /* this attempt captured the subscribe result */
+    bool        sec_degrade_logged; /* logged the single-pool-degrade note once */
+    int64_t     sec_attempt_deadline_us;  /* abort the current attempt at this time */
+    int64_t     sec_retry_at_us;          /* reconnect when now >= this (SEC_WAIT) */
+    int         sec_backoff_s;   /* current retry backoff (s) */
+    char        worker[128];     /* miner's worker, replayed to authorize the sec */
+    char        pass[128];       /* miner's password, ditto */
+    const char *up_addr[2];      /* "host:port" per pool, for secondary reconnect */
+
     linebuf_t bmin;              /* miner  -> mux */
     linebuf_t bup[2];            /* upstream[p] -> mux */
 } mux_t;
@@ -134,6 +154,76 @@ static int64_t now_us(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+}
+
+/* ---- env-gated handshake debug (SPLITMUX_DEBUG=1) -----------------------
+ * Dumps every complete Stratum line the mux SENDS to / RECEIVES from each pool
+ * during handshake + steady state, and each submit's routing decision, so a
+ * real-ckproxy transcript can be compared line-for-line against a byte relay.
+ * Off (one getenv, cached) unless SPLITMUX_DEBUG is set — zero prod overhead. */
+static int smx_dbg_on(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = getenv("SPLITMUX_DEBUG") ? 1 : 0;
+    return cached;
+}
+
+/* pool: 0=A, 1=B, -1=miner. dir: "TX" (mux->peer) or "RX" (peer->mux). */
+static void smx_dbg_line(const char *dir, int pool, const char *line, size_t len)
+{
+    if (!smx_dbg_on())
+        return;
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        len--;
+    char tag = pool < 0 ? 'M' : (pool == 0 ? 'A' : 'B');
+    fprintf(stderr, "[smux %s %c] %.*s\n", dir, tag, (int)len, line);
+}
+
+__attribute__((format(printf, 1, 2)))
+static void smx_dbg(const char *fmt, ...)
+{
+    if (!smx_dbg_on())
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("[smux    ] ", stderr);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+
+/* Connect a fresh TCP socket to a "host:port" string (last colon splits). Used
+ * to re-open the secondary upstream between retry attempts. Returns the fd, or
+ * -1 on any failure. getaddrinfo is available under _POSIX_C_SOURCE 200809L. */
+static int connect_hostport(const char *hostport)
+{
+    if (!hostport)
+        return -1;
+    char buf[256];
+    snprintf(buf, sizeof buf, "%s", hostport);
+    char *colon = strrchr(buf, ':');
+    if (!colon)
+        return -1;
+    *colon = '\0';
+
+    struct addrinfo hints, *res = NULL, *rp;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(buf, colon + 1, &hints, &res) != 0)
+        return -1;
+    int fd = -1;
+    for (rp = res; rp; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0)
+            continue;
+        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0)
+            break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    return fd;
 }
 
 /* Write exactly n bytes, retrying short writes and EINTR. Returns 0 on
@@ -441,6 +531,7 @@ static int read_subscribe_result(mux_t *m, int p)
     for (;;) {
         if (!blocking_line(m->pool[p].fd, &m->bup[p], line, sizeof line, &ll))
             return -1;
+        smx_dbg_line("RX", p, line, ll);
         json_error_t e;
         json_t *r = json_loads(line, 0, &e);
         if (!r)
@@ -466,59 +557,39 @@ static int read_subscribe_result(mux_t *m, int p)
     }
 }
 
-/* D1b: exactly one pool's subscribe failed mid-handshake (it went workless/dead
- * between the splitter's readiness gate and here). Rather than drop the miner,
- * present the SURVIVING pool's session and relay verbatim to it for the rest of
- * this connection — never arming a swap. `surv` is the good pool (0/1); the
- * miner's subscribe id is `sub_id`. The miner mines a working pool instead of
- * reconnect-looping against a dead one; a future reconnect re-attempts the
- * split (self-healing). Returns DH_DEGRADED (relay ran to completion) or
- * DH_FAIL if even the survivor's reply/relay could not be written. */
-static int single_pool_degrade(mux_t *m, int surv, int64_t sub_id)
-{
-    pool_t *ap = &m->pool[surv];
-    /* enonce1 was hex-validated in read_subscribe_result, so it cannot break
-     * the synthesized JSON here. */
-    char rep[512];
-    int rl = snprintf(rep, sizeof rep,
-        "{\"id\":%lld,\"result\":[[[\"mining.set_difficulty\",\"%s\"],"
-        "[\"mining.notify\",\"%s\"]],\"%s\",%d],\"error\":null}\n",
-        (long long)sub_id, ap->enonce1, ap->enonce1, ap->enonce1, ap->n2len);
-    if (rl < 0 || (size_t)rl >= sizeof rep ||
-        write_all(m->down_fd, rep, (size_t)rl) < 0)
-        return DH_FAIL;
-
-    fprintf(stderr, "splitmux: single-pool degrade -> mining pool %c "
-            "(other pool's handshake failed)\n", surv == 0 ? 'A' : 'B');
-
-    /* The mux already drove its sentinel subscribe to the survivor and consumed
-     * that reply; from here the miner's authorize/submits relay straight to the
-     * survivor. Seed the relay with anything already buffered during handshake. */
-    splitmux_relay_seeded(m->down_fd, ap->fd, &m->bmin, &m->bup[surv]);
-    return DH_DEGRADED;
-}
-
-/* Drive subscribe + authorize to both pools and synthesize the miner session.
- * Returns DH_OK on the both-good dual path, DH_DEGRADED if exactly one pool
- * failed and the miner was handed to a single-pool relay on the survivor (D1b),
- * or DH_FAIL if the miner disconnected or both pools failed. */
-static int dual_handshake(mux_t *m)
+/* Synchronously bring up ONE pool (the PRIMARY) and reply to the miner from it.
+ * Prefers `start_pool` (0/1) else A when ratio favours A; on the preferred
+ * pool's subscribe failing, falls back to the other pool as primary. Reads the
+ * miner's subscribe + authorize (tolerating configure / extranonce.subscribe),
+ * captures the worker/password for the async secondary's own authorize, and
+ * replies to the miner exactly as the old happy path did. Returns the primary
+ * pool index (0/1) with m->active set, or -1 if the miner left or BOTH pools
+ * failed their subscribe. The secondary is NOT touched here — the poll loop
+ * brings it up asynchronously. */
+static int primary_handshake(mux_t *m)
 {
     char line[SPLITMUX_LINE];
     size_t ll;
     int64_t sub_id = 1;
 
-    /* 1. miner subscribe (tolerate a leading mining.configure) */
+    int pref = (m->start_pool == 0 || m->start_pool == 1)
+                   ? m->start_pool
+                   : ((m->ratio_a >= 50) ? 0 : 1);
+
+    /* 1. miner subscribe (tolerate a leading mining.configure). Forward the
+     * configure only to the PRIMARY candidate side is not knowable yet, so send
+     * it to both existing fds under the sentinel id (harmless; the secondary may
+     * be reconnected later and simply re-subscribes without it). */
     for (;;) {
         if (!blocking_line(m->down_fd, &m->bmin, line, sizeof line, &ll))
             return -1;
+        smx_dbg_line("RX", -1, line, ll);
         stratum_msg_t msg;
         if (stratum_msg_parse(line, &msg) != 0)
             continue;
         if (msg.type == SM_CONFIGURE) {
-            /* Drive our OWN configure to the pools under a sentinel id so the
-             * pools' acks are recognizable (and dropped) rather than mistaken
-             * for submit acks; synthesize the miner's ack with the miner's id. */
+            smx_dbg("primary: forwarding miner mining.configure to BOTH pools "
+                    "(sentinel id), answering miner {} verbatim\n");
             if (forward_with_id(m->pool[0].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
             if (forward_with_id(m->pool[1].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
             char rep[128];
@@ -536,54 +607,58 @@ static int dual_handshake(mux_t *m)
         }
     }
 
-    /* 2. subscribe to both upstreams (sentinel id) */
+    /* 2. subscribe the PRIMARY (preferred pool, else the other). Sentinel id. */
     static const char sub[] =
         "{\"id\":90000001,\"method\":\"mining.subscribe\","
         "\"params\":[\"dualpool-mux/1.0\"]}\n";
-    if (write_all(m->pool[0].fd, sub, sizeof sub - 1) < 0) return -1;
-    if (write_all(m->pool[1].fd, sub, sizeof sub - 1) < 0) return -1;
+    int primary = -1;
+    smx_dbg("primary: trying pref pool %c — sending mux subscribe\n",
+            pref == 0 ? 'A' : 'B');
+    smx_dbg_line("TX", pref, sub, sizeof sub - 1);
+    if (write_all(m->pool[pref].fd, sub, sizeof sub - 1) == 0 &&
+        read_subscribe_result(m, pref) == 0) {
+        primary = pref;
+    } else {
+        int other = pref ^ 1;
+        smx_dbg("primary: pref pool %c subscribe FAILED — trying pool %c\n",
+                pref == 0 ? 'A' : 'B', other == 0 ? 'A' : 'B');
+        smx_dbg_line("TX", other, sub, sizeof sub - 1);
+        if (write_all(m->pool[other].fd, sub, sizeof sub - 1) == 0 &&
+            read_subscribe_result(m, other) == 0)
+            primary = other;
+    }
+    if (primary < 0) {
+        smx_dbg("primary: BOTH pools failed their subscribe — aborting\n");
+        return -1;                       /* both pools failed their subscribe */
+    }
+    m->active = primary;
+    smx_dbg("primary: pool %c selected; enonce1=%s n2len=%d\n",
+            primary == 0 ? 'A' : 'B', m->pool[primary].enonce1,
+            m->pool[primary].n2len);
 
-    /* 3. capture each pool's extranonce1 / n2 size. D1b: capture each result
-     * INDEPENDENTLY. If exactly ONE pool fails (timeout/EOF), degrade to a
-     * single-pool relay on the survivor instead of dropping the miner; only if
-     * BOTH fail do we give up. */
-    bool okA = (read_subscribe_result(m, 0) == 0);
-    bool okB = (read_subscribe_result(m, 1) == 0);
-    if (!okA && !okB) return DH_FAIL;
-    if (!okA) return single_pool_degrade(m, 1, sub_id);   /* A dead -> mine B */
-    if (!okB) return single_pool_degrade(m, 0, sub_id);   /* B dead -> mine A */
-
-    /* 4. seed the active pool: an explicit start_pool (0/1) wins so the splitter
-     * can alternate reconnecting fallback miners; otherwise fall back to the
-     * ratio (A when the ratio favours A). */
-    if (m->start_pool == 0 || m->start_pool == 1)
-        m->active = m->start_pool;
-    else
-        m->active = (m->ratio_a >= 50) ? 0 : 1;
-
-    /* 5. reply to the miner with the active pool's session params */
-    pool_t *ap = &m->pool[m->active];
+    /* 3. reply to the miner with the primary's session params */
+    pool_t *ap = &m->pool[primary];
     char rep[512];
-    /* enonce1 was hex-validated in read_subscribe_result, so it cannot break
-     * the JSON here; range-check the format anyway (FIX-10). */
     int rl = snprintf(rep, sizeof rep,
         "{\"id\":%lld,\"result\":[[[\"mining.set_difficulty\",\"%s\"],"
         "[\"mining.notify\",\"%s\"]],\"%s\",%d],\"error\":null}\n",
         (long long)sub_id, ap->enonce1, ap->enonce1, ap->enonce1, ap->n2len);
     if (rl < 0 || (size_t)rl >= sizeof rep || write_all(m->down_fd, rep, (size_t)rl) < 0)
         return -1;
+    smx_dbg_line("TX", -1, rep, (size_t)rl);
 
-    /* 6. miner authorize (tolerate a mining.configure here too) */
+    /* 4. miner authorize (tolerate configure / extranonce.subscribe). Capture
+     * the worker/password so the async secondary can authorize with them. */
     int64_t auth_id = 2;
     for (;;) {
         if (!blocking_line(m->down_fd, &m->bmin, line, sizeof line, &ll))
             return -1;
+        smx_dbg_line("RX", -1, line, ll);
         stratum_msg_t msg;
         if (stratum_msg_parse(line, &msg) != 0)
             continue;
         if (msg.type == SM_CONFIGURE) {
-            if (forward_with_id(m->pool[0].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
-            if (forward_with_id(m->pool[1].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
+            if (forward_with_id(m->pool[primary].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
             char cr[128];
             int cl = snprintf(cr, sizeof cr,
                 "{\"id\":%lld,\"result\":{},\"error\":null}\n",
@@ -594,21 +669,18 @@ static int dual_handshake(mux_t *m)
             continue;
         }
         if (msg.type == SM_EXTRANONCE_SUBSCRIBE) {
-            /* M5: the miner advertises set_extranonce support here (common:
-             * right after subscribe, before authorize). Record capability and
-             * forward to the active pool as normal chatter so its ack relays
-             * back to the miner (FIX-1). Keep waiting for the authorize. */
+            /* M5: miner advertises set_extranonce support (smooth swaps). Record
+             * capability and forward to the primary so its ack relays back. */
             m->miner_ext_ok = true;
-            if (write_all(m->pool[m->active].fd, line, ll) < 0)
+            smx_dbg("primary: miner is set_extranonce-capable; forwarding "
+                    "extranonce.subscribe to pool %c\n", primary == 0 ? 'A' : 'B');
+            smx_dbg_line("TX", primary, line, ll);
+            if (write_all(m->pool[primary].fd, line, ll) < 0)
                 return -1;
             continue;
         }
         if (msg.type == SM_AUTHORIZE) {
             auth_id = msg.id;
-            /* Send the mux's OWN mining.authorize (sentinel id) to both pools,
-             * carrying the worker/password the miner supplied. Building via
-             * jansson keeps worker/pass safe from JSON injection; the sentinel
-             * id lets us drop the pools' acks instead of relaying them. */
             const char *pw = "";
             json_error_t je;
             json_t *mj = json_loads(line, 0, &je);
@@ -617,6 +689,10 @@ static int dual_handshake(mux_t *m)
                 const char *jp = json_string_value(json_array_get(mp, 1));
                 if (jp) pw = jp;
             }
+            /* stash worker/pass for the secondary's own mining.authorize */
+            snprintf(m->worker, sizeof m->worker, "%s", msg.worker);
+            snprintf(m->pass, sizeof m->pass, "%s", pw);
+            /* Send the mux's OWN authorize (sentinel id) to the PRIMARY. */
             json_t *aj = json_pack("{s:I,s:s,s:[s,s]}",
                 "id", (json_int_t)SENTINEL_AUTHORIZE,
                 "method", "mining.authorize",
@@ -625,23 +701,197 @@ static int dual_handshake(mux_t *m)
             if (mj) json_decref(mj);
             if (aj) json_decref(aj);
             if (!ad) return -1;
-            int arc = write_all(m->pool[0].fd, ad, strlen(ad));
-            if (arc == 0) arc = write_all(m->pool[0].fd, "\n", 1);
-            if (arc == 0) arc = write_all(m->pool[1].fd, ad, strlen(ad));
-            if (arc == 0) arc = write_all(m->pool[1].fd, "\n", 1);
+            smx_dbg("primary: sending mux's OWN authorize (sentinel id) to pool "
+                    "%c for worker '%s'\n", primary == 0 ? 'A' : 'B', msg.worker);
+            smx_dbg_line("TX", primary, ad, strlen(ad));
+            int arc = write_all(m->pool[primary].fd, ad, strlen(ad));
+            if (arc == 0) arc = write_all(m->pool[primary].fd, "\n", 1);
             free(ad);
             if (arc < 0) return -1;
             break;
         }
     }
 
-    /* 7. reply true to the miner */
+    /* 5. reply true to the miner */
     char ar[128];
     int al = snprintf(ar, sizeof ar,
         "{\"id\":%lld,\"result\":true,\"error\":null}\n", (long long)auth_id);
     if (al < 0 || (size_t)al >= sizeof ar || write_all(m->down_fd, ar, (size_t)al) < 0)
         return -1;
+    smx_dbg_line("TX", -1, ar, (size_t)al);
+    smx_dbg("primary: handshake COMPLETE on pool %c (miner authorized true). "
+            "NOTE: mux did NOT wait for the pool's authorize RESULT.\n",
+            primary == 0 ? 'A' : 'B');
+    return primary;
+}
+
+/* ------------------- asynchronous secondary-pool bring-up ---------------- */
+
+static int lb_fill(int fd, linebuf_t *lb);   /* defined with the dual poll loop */
+
+/* Send the mux's own subscribe + authorize (sentinel ids) to the secondary fd,
+ * pipelined. Returns 0, or -1 on a write failure. */
+static int sec_send_handshake(mux_t *m)
+{
+    int fd = m->pool[m->sec].fd;
+    static const char sub[] =
+        "{\"id\":90000001,\"method\":\"mining.subscribe\","
+        "\"params\":[\"dualpool-mux/1.0\"]}\n";
+    smx_dbg("secondary(%c): sending pipelined subscribe+authorize\n",
+            m->sec == 0 ? 'A' : 'B');
+    smx_dbg_line("TX", m->sec, sub, sizeof sub - 1);
+    if (write_all(fd, sub, sizeof sub - 1) < 0)
+        return -1;
+    json_t *aj = json_pack("{s:I,s:s,s:[s,s]}",
+        "id", (json_int_t)SENTINEL_AUTHORIZE,
+        "method", "mining.authorize",
+        "params", m->worker, m->pass);
+    char *ad = aj ? json_dumps(aj, JSON_COMPACT) : NULL;
+    if (aj) json_decref(aj);
+    if (!ad)
+        return -1;
+    smx_dbg_line("TX", m->sec, ad, strlen(ad));
+    int rc = write_all(fd, ad, strlen(ad));
+    if (rc == 0) rc = write_all(fd, "\n", 1);
+    free(ad);
+    return rc;
+}
+
+/* Close the secondary fd, log a one-time single-pool-degrade note, and schedule
+ * a backoff reconnect. Called on a failed/timed-out bring-up attempt. */
+static void sec_fail(mux_t *m, int64_t t)
+{
+    int p = m->sec;
+    if (m->pool[p].fd >= 0) {
+        close(m->pool[p].fd);
+        m->pool[p].fd = -1;
+    }
+    m->sec_state = SEC_WAIT;
+    m->sec_got_sub = false;
+    m->sec_retry_at_us = t + (int64_t)m->sec_backoff_s * 1000000LL;
+    if (!m->sec_degrade_logged) {
+        fprintf(stderr, "splitmux: secondary pool %c not ready — single-pool "
+                "degrade to pool %c, retrying (backoff %ds)\n",
+                p == 0 ? 'A' : 'B', m->active == 0 ? 'A' : 'B', m->sec_backoff_s);
+        m->sec_degrade_logged = true;
+    }
+    int nb = m->sec_backoff_s * 2;
+    if (nb > SEC_BACKOFF_MAX) nb = SEC_BACKOFF_MAX;
+    m->sec_backoff_s = nb;
+}
+
+/* Begin (or retry) a secondary bring-up attempt: (re)connect the fd if needed,
+ * reset per-attempt state, and send subscribe+authorize. On connect/send
+ * failure, drops back into SEC_WAIT with backoff. */
+static void sec_begin_attempt(mux_t *m, int64_t t)
+{
+    int p = m->sec;
+    if (m->pool[p].fd < 0) {
+        m->pool[p].fd = connect_hostport(m->up_addr[p]);
+        if (m->pool[p].fd < 0) {
+            m->sec_state = SEC_WAIT;      /* connect failed: back off and retry */
+            m->sec_retry_at_us = t + (int64_t)m->sec_backoff_s * 1000000LL;
+            int nb = m->sec_backoff_s * 2;
+            if (nb > SEC_BACKOFF_MAX) nb = SEC_BACKOFF_MAX;
+            m->sec_backoff_s = nb;
+            return;
+        }
+    }
+    /* fresh per-attempt state */
+    m->bup[p].len = 0; m->bup[p].scan = 0; m->bup[p].poison = false;
+    m->sec_got_sub = false;
+    m->pool[p].last_notify_len = 0;
+    m->pool[p].enonce1[0] = '\0';
+    m->sec_state = SEC_HANDSHAKING;
+    m->sec_attempt_deadline_us = t + (int64_t)SEC_ATTEMPT_MS * 1000LL;
+    if (sec_send_handshake(m) < 0)
+        sec_fail(m, t);
+}
+
+/* Parse one secondary handshake line. Captures the sentinel subscribe result
+ * (enonce1/n2len) and, via pool_capture_state, set_difficulty/notify. Returns 0
+ * to keep going, -1 to fail the attempt (subscribe error or non-hex enonce1). */
+static int sec_handshake_line(mux_t *m, const char *line)
+{
+    int p = m->sec;
+    smx_dbg_line("RX", p, line, strlen(line));
+    json_error_t e;
+    json_t *r = json_loads(line, 0, &e);
+    if (!r)
+        return 0;
+    json_t *idj = json_object_get(r, "id");
+    if (idj && json_is_integer(idj) &&
+        json_integer_value(idj) == SENTINEL_SUBSCRIBE) {
+        json_t *res = json_object_get(r, "result");
+        if (!json_is_array(res)) {             /* subscribe error -> fail attempt */
+            json_decref(r);
+            return -1;
+        }
+        const char *en = json_string_value(json_array_get(res, 1));
+        json_t *n2 = json_array_get(res, 2);
+        snprintf(m->pool[p].enonce1, sizeof m->pool[p].enonce1, "%s", en ? en : "");
+        m->pool[p].n2len = (int)json_integer_value(n2);
+        json_decref(r);
+        if (!is_hex_str(m->pool[p].enonce1))
+            return -1;                         /* malformed enonce1 -> fail */
+        m->sec_got_sub = true;
+        return 0;
+    }
+    json_decref(r);
+    /* not the subscribe result: capture set_difficulty / notify state */
+    pool_capture_state(m, p, line);
     return 0;
+}
+
+/* Read + process pending secondary bytes during SEC_HANDSHAKING. Returns 1 once
+ * the pool is READY (subscribe result + a notify captured), 0 to keep going, or
+ * -1 if the attempt failed (EOF/error/bad line) and must be retried. */
+static int sec_pump(mux_t *m)
+{
+    int p = m->sec;
+    if (lb_fill(m->pool[p].fd, &m->bup[p]) < 0)
+        return -1;                             /* EOF / socket error */
+
+    linebuf_t *lb = &m->bup[p];
+    size_t flush = 0;
+    for (size_t i = lb->scan; i < lb->len; i++)
+        if (lb->data[i] == '\n')
+            flush = i + 1;
+    lb->scan = lb->len;
+    if (flush == 0) {
+        if (lb->len == SPLITMUX_BUF) {         /* oversized line: drop + poison */
+            lb->len = 0; lb->scan = 0; lb->poison = true;
+        }
+        return 0;
+    }
+
+    int result = 0;                            /* -1 fail; else 0 */
+    bool became_ready = false;
+    size_t start = 0;
+    for (size_t i = 0; i < flush; i++) {
+        if (lb->data[i] != '\n')
+            continue;
+        size_t linelen = i + 1 - start;
+        if (lb->poison) {
+            lb->poison = false;
+        } else if (linelen < SPLITMUX_LINE) {
+            char tmp[SPLITMUX_LINE];
+            memcpy(tmp, lb->data + start, linelen);
+            tmp[linelen] = '\0';
+            if (sec_handshake_line(m, tmp) < 0) { result = -1; break; }
+            if (!became_ready && m->sec_got_sub &&
+                m->pool[p].last_notify_len > 0)
+                became_ready = true;
+        }
+        start = i + 1;
+    }
+    memmove(lb->data, lb->data + flush, lb->len - flush);
+    lb->len -= flush;
+    lb->scan = lb->len;
+
+    if (result < 0)
+        return -1;
+    return became_ready ? 1 : 0;
 }
 
 /* Bank the active pool's elapsed time since slice_start into its cumulative
@@ -713,6 +963,7 @@ static int do_swap(mux_t *m, const char *notify_line, size_t nlen, int64_t t)
  * failure to the miner. */
 static int handle_upstream_line(mux_t *m, int p, const char *line, size_t len)
 {
+    smx_dbg_line("RX", p, line, len);
     stratum_msg_t msg;
     if (stratum_msg_parse(line, &msg) != 0)
         return 0;
@@ -794,6 +1045,10 @@ static int handle_submit(mux_t *m, const char *job_id, const char *line,
             return 0;                   /* left p longer ago than grace -> drop */
         }
     }
+    smx_dbg("submit: job=%s routed -> pool %c%s\n", job_id,
+            pool == 0 ? 'A' : 'B',
+            (idx < 0) ? " (unknown job-id, active fallback)" : "");
+    smx_dbg_line("TX", pool, line, len);
     if (write_all(m->pool[pool].fd, line, len) < 0)
         return -1;
     m->total_work += m->pool[pool].diff * 4294967296.0;
@@ -845,6 +1100,9 @@ static int process_lines(mux_t *m, linebuf_t *lb, bool from_up, int p)
                     if (parsed && msg.type == SM_EXTRANONCE_SUBSCRIBE)
                         m->miner_ext_ok = true;
                     /* non-submit miner chatter -> active pool */
+                    smx_dbg("miner chatter -> active pool %c\n",
+                            m->active == 0 ? 'A' : 'B');
+                    smx_dbg_line("TX", m->active, tmp, linelen);
                     if (write_all(m->pool[m->active].fd, tmp, linelen) < 0) { rc = -1; break; }
                 }
             }
@@ -881,32 +1139,78 @@ static int lb_fill(int fd, linebuf_t *lb)
     return 1;
 }
 
+/* Handle a readable upstream fd `p`. For the secondary mid-bring-up this drives
+ * the async state machine (and transitions it to READY); otherwise it is normal
+ * upstream processing. Returns 0 to keep the session going, or -1 to END it
+ * (fatal: the primary dropped, or the ACTIVE pool dropped). A NON-active
+ * secondary dropping is recoverable — it just schedules a backoff retry while
+ * the miner keeps mining the primary. */
+static int handle_pool_readable(mux_t *m, int p)
+{
+    if (p == m->sec && m->sec_state == SEC_HANDSHAKING) {
+        int sr = sec_pump(m);
+        if (sr < 0) {
+            sec_fail(m, now_us());
+        } else if (sr == 1) {
+            m->sec_state = SEC_READY;
+            m->sec_backoff_s = SEC_BACKOFF_MIN;
+            m->sec_degrade_logged = false;
+            fprintf(stderr, "splitmux: secondary pool %c ready\n",
+                    m->sec == 0 ? 'A' : 'B');
+            /* drain any lines already buffered past the first notify */
+            if (process_lines(m, &m->bup[p], true, p) < 0)
+                return -1;
+        }
+        return 0;
+    }
+    if (lb_fill(m->pool[p].fd, &m->bup[p]) < 0) {
+        if (p == m->sec && m->active != m->sec) {
+            sec_fail(m, now_us());       /* non-active secondary died: retry it */
+            return 0;
+        }
+        return -1;                       /* primary / active pool died: end */
+    }
+    if (process_lines(m, &m->bup[p], true, p) < 0)
+        return -1;
+    return 0;
+}
+
 static void splitmux_dual(mux_t *m)
 {
-    /* DH_OK -> run the swap loop; DH_FAIL -> give up; DH_DEGRADED -> the
-     * handshake already handed the miner to a single-pool relay on the survivor
-     * (D1b) and it has now returned, so we're done. */
-    if (dual_handshake(m) != DH_OK)
-        return;
+    /* Primary pool: synchronous handshake, miner mines it immediately. */
+    int primary = primary_handshake(m);
+    if (primary < 0)
+        return;                          /* miner left, or BOTH pools failed */
+    m->sec = primary ^ 1;
+    m->sec_backoff_s = SEC_BACKOFF_MIN;
+    m->sec_degrade_logged = false;
 
-    m->slice_start_us = now_us();
-    m->slice_deadline_us = m->slice_start_us + next_slice_us(m, m->active);
+    int64_t t0 = now_us();
+    /* Secondary pool: kick off the async bring-up on its already-connected fd. */
+    sec_begin_attempt(m, t0);
 
-    /* Drain the set_difficulty + first notify the pools queued after authorize
-     * (they may already be buffered from the handshake reads). */
-    if (process_lines(m, &m->bup[0], true, 0) < 0) return;
-    if (process_lines(m, &m->bup[1], true, 1) < 0) return;
-    /* Also drain anything the miner pipelined after authorize (e.g. a
-     * mining.extranonce.subscribe in the same TCP segment): otherwise a capable
-     * miner that then stays silent through the first slice would be misdetected
-     * as naive and needlessly reconnect-sliced. */
+    m->slice_start_us = t0;
+    m->slice_deadline_us = t0 + next_slice_us(m, m->active);
+
+    /* Drain the set_difficulty + first notify the PRIMARY queued after authorize,
+     * plus anything the miner pipelined (so a capable miner that then goes quiet
+     * isn't misdetected as naive and needlessly reconnect-sliced). */
+    if (process_lines(m, &m->bup[primary], true, primary) < 0) return;
     if (process_lines(m, &m->bmin, false, -1) < 0) return;
 
     for (;;) {
+        int64_t t = now_us();
+        /* Secondary retry timer: reconnect once the backoff elapses. */
+        if (m->sec_state == SEC_WAIT && t >= m->sec_retry_at_us)
+            sec_begin_attempt(m, t);
+
         struct pollfd pfds[3];
         pfds[0].fd = m->down_fd;    pfds[0].events = POLLIN; pfds[0].revents = 0;
         pfds[1].fd = m->pool[0].fd; pfds[1].events = POLLIN; pfds[1].revents = 0;
         pfds[2].fd = m->pool[1].fd; pfds[2].events = POLLIN; pfds[2].revents = 0;
+        /* the secondary fd is closed/absent while it backs off */
+        if (m->sec_state == SEC_WAIT)
+            pfds[m->sec + 1].fd = -1;
 
         int rc = poll(pfds, 3, 200);
         if (rc < 0) {
@@ -919,59 +1223,62 @@ static void splitmux_dual(mux_t *m)
 
         /* Process all pending I/O FIRST, so any miner submit already buffered
          * for the current active pool is routed BEFORE a deadline swap flips the
-         * active pool. (Swapping first would misroute an in-flight old-job
-         * submit to the newly-active pool — visible only under a shared job-id
-         * namespace, where the two pools' job strings collide.) */
+         * active pool. */
         if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
             if (lb_fill(m->down_fd, &m->bmin) < 0) break;
             if (process_lines(m, &m->bmin, false, -1) < 0) break;
         }
         if (pfds[1].revents & (POLLIN | POLLHUP | POLLERR)) {
-            if (lb_fill(m->pool[0].fd, &m->bup[0]) < 0) break;
-            if (process_lines(m, &m->bup[0], true, 0) < 0) break;
+            if (handle_pool_readable(m, 0) < 0) break;
         }
         if (pfds[2].revents & (POLLIN | POLLHUP | POLLERR)) {
-            if (lb_fill(m->pool[1].fd, &m->bup[1]) < 0) break;
-            if (process_lines(m, &m->bup[1], true, 1) < 0) break;
+            if (handle_pool_readable(m, 1) < 0) break;
         }
+
+        /* Secondary per-attempt timeout (a pool that accepts TCP but never
+         * answers won't fire the data path above). */
+        if (m->sec_state == SEC_HANDSHAKING &&
+            now_us() >= m->sec_attempt_deadline_us)
+            sec_fail(m, now_us());
 
         /* Deadline check (fires on data or on the 200 ms timeout), AFTER the
          * buffered submits above have been routed under the old active pool. */
-        int64_t t = now_us();
+        t = now_us();
         if (!m->pending && t >= m->slice_deadline_us) {
             bank_slice(m, t);            /* bank the finished slice first */
             int tgt = split_sched_next_pool(m->active, m->a_us, m->b_us,
                                             m->ratio_a);
             if (tgt != m->active) {
-                /* M5 reconnect-slice fallback: a miner that never advertised
-                 * set_extranonce support cannot follow a smooth swap (it would
-                 * keep the old pool's extranonce1 while mining the new pool's
-                 * jobs -> 100% rejects). Instead of swapping, drop the miner so
-                 * it reconnects; the splitter (M6.2) alternates start_pool to
-                 * bind it to the next pool. We mined only the active upstream on
-                 * this connection; the caller owns and closes all fds. */
-                if (!m->miner_ext_ok) {
+                if (tgt == m->sec && m->sec_state != SEC_READY) {
+                    /* Secondary not ready yet: don't swap onto it — extend the
+                     * primary slice and keep mining the primary. */
+                    m->slice_deadline_us = t + next_slice_us(m, m->active);
+                } else if (!m->miner_ext_ok) {
+                    /* M5 reconnect-slice fallback: a miner that never advertised
+                     * set_extranonce support cannot follow a smooth swap. Drop it
+                     * so it reconnects; the splitter alternates start_pool to bind
+                     * it to the next pool. The caller owns and closes all fds. */
                     fprintf(stderr, "splitmux: fallback reconnect-slice "
                                     "(miner lacks set_extranonce)\n");
                     shutdown(m->down_fd, SHUT_RDWR);
                     return;
-                }
-                m->target = tgt;
-                /* FIX-5: if the target has already sent a notify, swap NOW onto
-                 * its current job (rewritten clean_jobs=true) instead of waiting
-                 * for its next clean notify (which real pools issue ~per block).
-                 * Only if it has never notified do we arm pending. */
-                if (m->pool[tgt].last_notify_len > 0) {
-                    char nb[SPLITMUX_LINE];
-                    size_t nl;
-                    if (rewrite_notify_clean(m->pool[tgt].last_notify,
-                                             nb, sizeof nb, &nl) == 0) {
-                        if (do_swap(m, nb, nl, t) < 0) break;
-                    } else {
-                        m->pending = true;
-                    }
                 } else {
-                    m->pending = true;   /* no notify yet: swap on its first one */
+                    m->target = tgt;
+                    /* FIX-5: if the target has already sent a notify, swap NOW
+                     * onto its current job (rewritten clean_jobs=true) instead of
+                     * waiting for its next clean notify. */
+                    if (m->pool[tgt].last_notify_len > 0) {
+                        char nb[SPLITMUX_LINE];
+                        size_t nl;
+                        if (rewrite_notify_clean(m->pool[tgt].last_notify,
+                                                 nb, sizeof nb, &nl) == 0) {
+                            if (do_swap(m, nb, nl, t) < 0) break;
+                        } else {
+                            m->pending = true;
+                        }
+                    } else {
+                        m->pending = true;   /* swap on its first notify */
+                    }
                 }
             } else {
                 m->slice_deadline_us = t + next_slice_us(m, m->active);
@@ -981,12 +1288,14 @@ static void splitmux_dual(mux_t *m)
 }
 
 void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
-                  int target_shares, int min_s, int max_s, int start_pool)
+                  int target_shares, int min_s, int max_s, int start_pool,
+                  const char *up_addr[2])
 {
     if (up_fd[1] < 0) {
-        /* Single-pool passthrough (M3 / fallback): scheduler knobs unused. */
+        /* Single-pool passthrough (M3 / fallback): scheduler knobs + up_addr
+         * unused (no secondary to reconnect). */
         (void)ratio_a; (void)target_shares; (void)min_s; (void)max_s;
-        (void)start_pool;
+        (void)start_pool; (void)up_addr;
         splitmux_passthrough(down_fd, up_fd[0]);
         return;
     }
@@ -1001,5 +1310,13 @@ void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
     m.min_s = min_s;
     m.max_s = max_s;
     m.start_pool = start_pool;
+    m.up_addr[0] = up_addr ? up_addr[0] : NULL;
+    m.up_addr[1] = up_addr ? up_addr[1] : NULL;
     splitmux_dual(&m);
+
+    /* The secondary fd may have been closed/reopened during retries — hand the
+     * FINAL upstream fds back so the caller closes the right ones. A secondary
+     * that is mid-backoff at return is -1; the caller skips it. */
+    up_fd[0] = m.pool[0].fd;
+    up_fd[1] = m.pool[1].fd;
 }

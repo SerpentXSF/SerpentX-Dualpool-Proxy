@@ -25,6 +25,17 @@ static void test_parse_submit(void){
     assert(strcmp(m.worker,"wallet.w1")==0);
 }
 
+static void test_parse_authorize(void){
+    /* Regression: the mux builds its own upstream mining.authorize from this
+     * worker; if it isn't parsed, ckproxy (userproxy) rejects "Empty workername
+     * parameter" and no user/shares register. params[0] MUST be captured. */
+    const char *l = "{\"id\":2,\"method\":\"mining.authorize\",\"params\":"
+        "[\"bc1qexample.rig1\",\"x\"]}";
+    stratum_msg_t m; assert(stratum_msg_parse(l,&m)==0);
+    assert(m.type==SM_AUTHORIZE && m.id==2);
+    assert(strcmp(m.worker,"bc1qexample.rig1")==0);
+}
+
 static void test_parse_extranonce_subscribe(void){
     const char *l = "{\"id\":3,\"method\":\"mining.extranonce.subscribe\",\"params\":[]}";
     stratum_msg_t m; assert(stratum_msg_parse(l,&m)==0);
@@ -65,6 +76,7 @@ static void test_emit_overflow(void){
 int main(void){
     test_parse_notify();
     test_parse_submit();
+    test_parse_authorize();
     test_parse_extranonce_subscribe();
     test_emit_set_extranonce();
     test_emit_set_difficulty();

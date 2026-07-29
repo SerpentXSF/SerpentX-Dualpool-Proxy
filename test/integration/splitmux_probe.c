@@ -147,10 +147,13 @@ int main(int argc, char **argv)
             }
             int sp = alt_start ? (it & 1) : start_pool;
             int up_fd[2] = { up, up2 };
-            splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s, sp);
+            const char *up_addr[2] = { upstream, upstream2 };
+            splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s, sp, up_addr);
 
-            close(up2);
-            close(up);
+            /* splitmux_run may have reconnected the secondary — close the FINAL
+             * fds it wrote back, not the originals. */
+            if (up_fd[1] >= 0) close(up_fd[1]);
+            if (up_fd[0] >= 0) close(up_fd[0]);
             close(down_fd);
         }
         close(ls);
@@ -174,10 +177,13 @@ int main(int argc, char **argv)
     }
 
     int up_fd[2] = { up, up2 };
-    splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s, start_pool);
+    const char *up_addr[2] = { upstream, upstream2 };
+    splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s, start_pool, up_addr);
 
-    if (up2 >= 0) close(up2);
-    close(up);
+    /* Close the FINAL fds splitmux_run wrote back (the secondary may have been
+     * reconnected during retries), not the originals. */
+    if (up_fd[1] >= 0) close(up_fd[1]);
+    if (up_fd[0] >= 0) close(up_fd[0]);
     close(down_fd);
     return 0;
 }

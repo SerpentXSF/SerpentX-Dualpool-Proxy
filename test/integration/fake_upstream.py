@@ -34,6 +34,7 @@ still connected", which is how the eviction path is exercised. GPLv3.
 import argparse, json, signal, socket, sys, threading, time
 
 LOCK = threading.Lock()
+START = time.monotonic()   # process start, for --ready-delay not-ready-yet window
 
 def logline(path, s):
     with LOCK:
@@ -45,8 +46,41 @@ def logline(path, s):
 def enonce1_for(tag):
     return "aaaa0001" if tag == "A" else "bbbb0001"
 
-def handle(conn, tag, logpath, interval, jobns, workless=False):
+def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0):
     logline(logpath, f"{tag} conn")
+    if ready_delay > 0 and (time.monotonic() - START) < ready_delay:
+        # "not ready yet": for the first ready_delay seconds of PROCESS life,
+        # reject a subscribe with an error and close — simulating a ckproxy in
+        # userproxy mode that isn't ready ("Temporarily insufficient proxies" /
+        # "Failed to provide subscription due to no sdata"). The mux's secondary
+        # bring-up must retry (with backoff) until this pool becomes ready.
+        try:
+            f = conn.makefile("rwb")
+            for raw in f:
+                line = raw.decode(errors="ignore").strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except Exception:
+                    continue
+                if msg.get("method") == "mining.subscribe":
+                    err = {"id": msg.get("id"), "result": None,
+                           "error": [20, "Temporarily insufficient proxies to "
+                                         "accept more clients", None]}
+                    try:
+                        f.write((json.dumps(err) + "\n").encode()); f.flush()
+                    except Exception:
+                        pass
+                    return                       # close: not ready yet
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            return
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return
     if workless:
         # "reachable but workless": accept the TCP connection and NEVER answer
         # anything — no subscribe result, no notify. Simulates a ckproxy whose
@@ -103,6 +137,16 @@ def handle(conn, tag, logpath, interval, jobns, workless=False):
                       "result": [[["mining.notify", "ae6812eb"]], en1, 4],
                       "error": None})
             elif m == "mining.authorize":
+                # Real ckproxy (userproxy) keys the upstream user on the authorize
+                # username and REJECTS an empty one ("Empty workername parameter").
+                # Mirror that so the harness catches a mux that forgets to send the
+                # miner's worker (regression that shipped past the old fake).
+                params = msg.get("params") or []
+                worker = params[0] if params else ""
+                if not worker:
+                    send({"id": mid, "result": False,
+                          "error": [24, "Empty workername parameter", None]})
+                    continue
                 send({"id": mid, "result": True, "error": None})
                 send({"id": None, "method": "mining.set_difficulty",
                       "params": [1024]})
@@ -140,6 +184,10 @@ def main():
     ap.add_argument("--workless", action="store_true",
                     help="accept TCP but answer NOTHING (never subscribe) — "
                          "simulates a reachable-but-workless upstream")
+    ap.add_argument("--ready-delay", type=float, default=0.0, dest="ready_delay",
+                    help="for the first N seconds of process life, reject "
+                         "mining.subscribe with an error and close (simulates a "
+                         "ckproxy that isn't ready yet); afterwards behave normally")
     a = ap.parse_args()
     interval = a.notify_ms / 1000.0 if a.notify_ms > 0 else a.interval
 
@@ -163,7 +211,8 @@ def main():
         except OSError:
             break               # listener closed via SIGUSR1
         threading.Thread(target=handle,
-                         args=(conn, a.tag, a.log, interval, a.jobns, a.workless),
+                         args=(conn, a.tag, a.log, interval, a.jobns, a.workless,
+                               a.ready_delay),
                          daemon=True).start()
 
     # keep the process (and its live handler threads) alive after we stop listening

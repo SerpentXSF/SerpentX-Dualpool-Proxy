@@ -49,6 +49,7 @@ int stratum_msg_parse(const char *line, stratum_msg_t *out)
         out->type = SM_SUBSCRIBE;
     } else if (meth && !strcmp(meth, "mining.authorize")) {
         out->type = SM_AUTHORIZE;
+        cpy(out->worker, sizeof(out->worker), json_array_get(p, 0));
     } else if (meth && !strcmp(meth, "mining.configure")) {
         out->type = SM_CONFIGURE;
     } else if (json_object_get(r, "result")) {

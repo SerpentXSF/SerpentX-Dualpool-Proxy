@@ -360,13 +360,15 @@ typedef struct {
     int       slot;
     int       start_pool;   /* 0/1, or -1 to seed from ratio (single-pool: ignored) */
     int       ratio_a;      /* snapshot at accept time */
+    char      up_addr[2][128];  /* "host:port" per pool, for secondary reconnect */
 } splitmux_conn_t;
 
 static void *splitmux_conn_thread(void *arg)
 {
     splitmux_conn_t *c = arg;
+    const char *ua[2] = { c->up_addr[0], c->up_addr[1] };
     splitmux_run(c->down_fd, c->up_fd, c->ratio_a, g_target_shares,
-                 g_min_slice_s, g_max_slice_s, c->start_pool);
+                 g_min_slice_s, g_max_slice_s, c->start_pool, ua);
     /* Free the slot BEFORE closing fds — same fd-reuse eviction-race ordering
      * conn_thread documents (evict_all/evict_pool must never shutdown() a fd
      * number the kernel has already handed to a newer accept()). */
@@ -927,6 +929,12 @@ static int run_accept_loop(int listen_port)
             c->up_fd[1]   = up_fd[1];
             c->slot       = slot;
             c->start_pool = start_pool;
+            /* "host:port" per pool so splitmux can reconnect the secondary while
+             * it retries a not-ready ckproxy. Indexed by actual pool (A=0/B=1). */
+            snprintf(c->up_addr[0], sizeof c->up_addr[0], "%s:%s",
+                     g_pool_host[POOL_A], g_pool_port[POOL_A]);
+            snprintf(c->up_addr[1], sizeof c->up_addr[1], "%s:%s",
+                     g_pool_host[POOL_B], g_pool_port[POOL_B]);
             pthread_mutex_lock(&g_alloc_lock);
             c->ratio_a = g_alloc.ratio_a;
             g_routed[reg_pool]++;
