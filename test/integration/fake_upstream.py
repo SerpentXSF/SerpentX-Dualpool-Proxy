@@ -3,8 +3,27 @@
 
 Speaks just enough Stratum to let a miner subscribe/authorize/submit. Appends
 one line per event to stdout (and optionally a file) so runners can count them:
-    <TAG> conn      (a connection reached this pool)
-    <TAG> share     (a share was submitted to this pool)
+    <TAG> conn               (a connection reached this pool)
+    <TAG> notify job=<jobid> (this pool ISSUED that job to the mux)
+    <TAG> share job=<jobid>  (a share was submitted to this pool, with its job)
+
+Each tag advertises a DISTINCT extranonce1 (A -> "aaaa0001", else "bbbb0001")
+so the mux can synthesize per-pool sessions and a runner can verify routing.
+After authorize the upstream keeps issuing a fresh *clean* mining.notify every
+~1.2 s with a monotonically increasing job-id, giving the mux clean-job
+boundaries to swap on.
+
+Job-id namespace is selectable so a test can force a COLLISION:
+    --jobns tag     (default) job-ids are "<tag>-<seq>" (A-0, B-0, ...)
+    --jobns shared  both pools use "job-<seq>" (overlapping namespace) — this
+                    exercises FIX-3 (the mux must route by the job it actually
+                    SHOWED, not by job-id string alone). The runner verifies
+                    zero cross-routing by matching each 'share job=' against the
+                    receiving pool's own 'notify job=' lines.
+
+The fresh-notify interval is a flag: --interval <seconds> or --notify-ms <ms>
+(the latter wins). A slow interval with short mux slices makes swaps fall
+BETWEEN notifies, exercising the swap-time stale-share grace (FIX-2).
 
 SIGUSR1 makes it STOP accepting new connections while keeping existing ones
 alive — simulating "pool unreachable to a health probe, but in-flight sessions
@@ -21,12 +40,39 @@ def logline(path, s):
             with open(path, "a") as f:
                 f.write(s + "\n"); f.flush()
 
-def handle(conn, tag, logpath):
+def enonce1_for(tag):
+    return "aaaa0001" if tag == "A" else "bbbb0001"
+
+def handle(conn, tag, logpath, interval, jobns):
     logline(logpath, f"{tag} conn")
+    en1 = enonce1_for(tag)
+    slock = threading.Lock()
+    seq = [0]
+    stop = threading.Event()
     try:
         f = conn.makefile("rwb")
         def send(obj):
-            f.write((json.dumps(obj) + "\n").encode()); f.flush()
+            with slock:
+                f.write((json.dumps(obj) + "\n").encode()); f.flush()
+        def job_id(n):
+            # 'shared' makes both pools use the SAME namespace ("job-<seq>"),
+            # forcing job-id collisions so FIX-3 routing is actually tested.
+            return f"job-{n}" if jobns == "shared" else f"{tag}-{n}"
+        def make_notify(clean=True):
+            n = seq[0]; seq[0] += 1
+            jid = job_id(n)
+            logline(logpath, f"{tag} notify job={jid}")
+            return {"id": None, "method": "mining.notify",
+                    "params": [jid, "0" * 64, "01", "02", [],
+                               "20000000", "1a2b3c4d", "5e6f7788", clean]}
+        def notifier():
+            # After authorize, keep feeding fresh clean jobs so the mux has
+            # clean-job boundaries to swap on.
+            while not stop.wait(interval):
+                try:
+                    send(make_notify(True))
+                except Exception:
+                    return
         for raw in f:
             line = raw.decode(errors="ignore").strip()
             if not line:
@@ -38,28 +84,44 @@ def handle(conn, tag, logpath):
             m, mid = msg.get("method"), msg.get("id")
             if m == "mining.subscribe":
                 send({"id": mid,
-                      "result": [[["mining.notify", "ae6812eb"]], "81000000", 4],
+                      "result": [[["mining.notify", "ae6812eb"]], en1, 4],
                       "error": None})
             elif m == "mining.authorize":
                 send({"id": mid, "result": True, "error": None})
-                send({"id": None, "method": "mining.set_difficulty", "params": [1024]})
-                send({"id": None, "method": "mining.notify",
-                      "params": ["job1", "0" * 64, "01", "02", [],
-                                 "20000000", "1a2b3c4d", "5e6f7788", True]})
+                send({"id": None, "method": "mining.set_difficulty",
+                      "params": [1024]})
+                send(make_notify(True))              # first clean job
+                threading.Thread(target=notifier, daemon=True).start()
             elif m == "mining.submit":
-                logline(logpath, f"{tag} share")
+                params = msg.get("params") or []
+                job = params[1] if len(params) > 1 else "?"
+                # params[3] is the extranonce1 the miner mined with. Under a
+                # shared job-id namespace the job prefix no longer reveals the
+                # origin pool, but this extranonce1 does: it MUST equal this
+                # pool's own en1, else the share was cross-routed (FIX-3).
+                en = params[3] if len(params) > 3 else "?"
+                logline(logpath, f"{tag} share job={job} en={en}")
                 send({"id": mid, "result": True, "error": None})
             elif mid is not None:
                 send({"id": mid, "result": True, "error": None})
     except (ConnectionResetError, BrokenPipeError, OSError):
         pass
+    finally:
+        stop.set()
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--tag", required=True)
     ap.add_argument("--log", required=True)
+    ap.add_argument("--interval", type=float, default=1.2,
+                    help="seconds between fresh clean notifies")
+    ap.add_argument("--notify-ms", type=int, default=0,
+                    help="ms between fresh clean notifies (overrides --interval)")
+    ap.add_argument("--jobns", choices=("tag", "shared"), default="tag",
+                    help="job-id namespace: 'tag' (A-/B-) or 'shared' (job-)")
     a = ap.parse_args()
+    interval = a.notify_ms / 1000.0 if a.notify_ms > 0 else a.interval
 
     ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -80,7 +142,9 @@ def main():
             conn, _ = ls.accept()
         except OSError:
             break               # listener closed via SIGUSR1
-        threading.Thread(target=handle, args=(conn, a.tag, a.log), daemon=True).start()
+        threading.Thread(target=handle,
+                         args=(conn, a.tag, a.log, interval, a.jobns),
+                         daemon=True).start()
 
     # keep the process (and its live handler threads) alive after we stop listening
     while True:

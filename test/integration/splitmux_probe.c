@@ -1,7 +1,8 @@
 /*
  * splitmux_probe.c — standalone harness that drives splitmux_run() directly
  * (the splitter is not wired to splitmux until M6.2). Listens for ONE miner,
- * connects ONE upstream, and relays between them via splitmux_run. GPLv3.
+ * connects ONE upstream (M3) or TWO upstreams via --upstream2 (M4), and relays
+ * between them via splitmux_run. GPLv3.
  * Copyright (C) 2025-2026 The SerpentX authors.
  */
 #define _POSIX_C_SOURCE 200112L   /* getaddrinfo/freeaddrinfo under -std=c11 */
@@ -80,11 +81,13 @@ int main(int argc, char **argv)
 
     int port = 0;
     const char *upstream = NULL;
+    const char *upstream2 = NULL;
     int ratio = 100, target = 10, min_s = 10, max_s = 120;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--listen") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--upstream") && i + 1 < argc) upstream = argv[++i];
+        else if (!strcmp(argv[i], "--upstream2") && i + 1 < argc) upstream2 = argv[++i];
         else if (!strcmp(argv[i], "--ratio") && i + 1 < argc) ratio = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--target") && i + 1 < argc) target = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--min") && i + 1 < argc) min_s = atoi(argv[++i]);
@@ -93,7 +96,8 @@ int main(int argc, char **argv)
     if (port <= 0 || !upstream) {
         fprintf(stderr,
                 "usage: %s --listen <port> --upstream <host:port>"
-                " [--ratio N] [--target N] [--min N] [--max N]\n", argv[0]);
+                " [--upstream2 <host:port>] [--ratio N] [--target N]"
+                " [--min N] [--max N]\n", argv[0]);
         return 2;
     }
 
@@ -103,9 +107,16 @@ int main(int argc, char **argv)
     int up = dial(upstream);
     if (up < 0) { close(down_fd); return 1; }
 
-    int up_fd[2] = { up, -1 };
+    int up2 = -1;
+    if (upstream2) {
+        up2 = dial(upstream2);
+        if (up2 < 0) { close(up); close(down_fd); return 1; }
+    }
+
+    int up_fd[2] = { up, up2 };
     splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s);
 
+    if (up2 >= 0) close(up2);
     close(up);
     close(down_fd);
     return 0;
