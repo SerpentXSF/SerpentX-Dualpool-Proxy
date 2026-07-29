@@ -54,8 +54,8 @@ cp "$ROOT/dualpool-splitter" "$BIN"
 # ---------------------------------------------------------------------------
 : > "$LOG"; : > "$SPLOG"; : > "$SMOOTHLOG"; : > "$NAIVELOG"
 echo "== starting fake upstreams A($APORT) + B($BPORT) + splitter (hashrate_split) =="
-python3 fake_upstream.py --port "$APORT" --tag A --log "$LOG" & UPA=$!
-python3 fake_upstream.py --port "$BPORT" --tag B --log "$LOG" & UPB=$!
+python3 fake_upstream.py --interval 1.2 --port "$APORT" --tag A --log "$LOG" & UPA=$!
+python3 fake_upstream.py --interval 1.2 --port "$BPORT" --tag B --log "$LOG" & UPB=$!
 sleep 0.6
 "$BIN" --listen "$LPORT" --poolA 127.0.0.1:$APORT --poolB 127.0.0.1:$BPORT \
   --mode hashrate_split --ratio 50 --target-shares 3 --min-slice 2 --max-slice 5 \

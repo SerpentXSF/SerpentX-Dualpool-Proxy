@@ -44,8 +44,8 @@ if echo "$PROBE_OUT" | grep -qi "warning:"; then
 
 : > "$LOG"; : > "$MINERLOG"
 echo "== starting fake upstreams A($APORT) + B($BPORT) with SHARED job namespace =="
-python3 fake_upstream.py --port "$APORT" --tag A --log "$LOG" --jobns shared & UPA=$!
-python3 fake_upstream.py --port "$BPORT" --tag B --log "$LOG" --jobns shared & UPB=$!
+python3 fake_upstream.py --interval 1.2 --port "$APORT" --tag A --log "$LOG" --jobns shared & UPA=$!
+python3 fake_upstream.py --interval 1.2 --port "$BPORT" --tag B --log "$LOG" --jobns shared & UPB=$!
 sleep 0.6
 "$PROBE" --listen "$LPORT" --upstream "127.0.0.1:$APORT" \
   --upstream2 "127.0.0.1:$BPORT" \

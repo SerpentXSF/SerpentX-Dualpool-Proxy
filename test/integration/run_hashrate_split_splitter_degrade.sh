@@ -63,7 +63,7 @@ S1SP=/tmp/hsplit_degrade_s1_sp.log
 S1MINER=/tmp/hsplit_degrade_s1_miner.log
 : > "$S1LOG"; : > "$S1SP"; : > "$S1MINER"
 
-python3 fake_upstream.py --port "$APORT" --tag A --log "$S1LOG" & UPA=$!
+python3 fake_upstream.py --interval 1.2 --port "$APORT" --tag A --log "$S1LOG" & UPA=$!
 sleep 0.6
 # NOTE: no upstream on BPORT -> connect() is refused.
 "$BIN" --listen "$LPORT" --poolA 127.0.0.1:$APORT --poolB 127.0.0.1:$BPORT \
@@ -101,8 +101,8 @@ S2SP=/tmp/hsplit_degrade_s2_sp.log
 S2MINER=/tmp/hsplit_degrade_s2_miner.log
 : > "$S2LOG"; : > "$S2SP"; : > "$S2MINER"
 
-python3 fake_upstream.py --port "$APORT" --tag A --log "$S2LOG" & UPA=$!
-python3 fake_upstream.py --port "$BPORT" --tag B --log "$S2LOG" --workless & UPB=$!
+python3 fake_upstream.py --interval 1.2 --port "$APORT" --tag A --log "$S2LOG" & UPA=$!
+python3 fake_upstream.py --interval 1.2 --port "$BPORT" --tag B --log "$S2LOG" --workless & UPB=$!
 sleep 0.6
 "$BIN" --listen "$LPORT" --poolA 127.0.0.1:$APORT --poolB 127.0.0.1:$BPORT \
   --mode hashrate_split --ratio 50 --target-shares 3 --min-slice 2 --max-slice 5 \
@@ -139,8 +139,8 @@ S3SP=/tmp/hsplit_degrade_s3_sp.log
 S3MINER=/tmp/hsplit_degrade_s3_miner.log
 : > "$S3LOG"; : > "$S3SP"; : > "$S3MINER"
 
-python3 fake_upstream.py --port "$APORT" --tag A --log "$S3LOG" & UPA=$!
-python3 fake_upstream.py --port "$BPORT" --tag B --log "$S3LOG" & UPB=$!
+python3 fake_upstream.py --interval 1.2 --port "$APORT" --tag A --log "$S3LOG" & UPA=$!
+python3 fake_upstream.py --interval 1.2 --port "$BPORT" --tag B --log "$S3LOG" & UPB=$!
 sleep 0.6
 # --max-slice 0 --min-slice 0: un-clamped this churns; clamped it is [1,1].
 "$BIN" --listen "$LPORT" --poolA 127.0.0.1:$APORT --poolB 127.0.0.1:$BPORT \

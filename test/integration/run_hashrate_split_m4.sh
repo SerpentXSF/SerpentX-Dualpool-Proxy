@@ -55,8 +55,8 @@ fi
 # ---------------------------------------------------------------------------
 : > "$LOG"; : > "$MINERLOG"
 echo "== starting fake upstreams A(4001) + B(4002) + probe =="
-python3 fake_upstream.py --port "$APORT" --tag A --log "$LOG" & UPA=$!
-python3 fake_upstream.py --port "$BPORT" --tag B --log "$LOG" & UPB=$!
+python3 fake_upstream.py --interval 1.2 --port "$APORT" --tag A --log "$LOG" & UPA=$!
+python3 fake_upstream.py --interval 1.2 --port "$BPORT" --tag B --log "$LOG" & UPB=$!
 sleep 0.6
 "$PROBE" --listen "$LPORT" --upstream "127.0.0.1:$APORT" \
   --upstream2 "127.0.0.1:$BPORT" \

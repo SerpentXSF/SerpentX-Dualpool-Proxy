@@ -9,9 +9,11 @@ one line per event to stdout (and optionally a file) so runners can count them:
 
 Each tag advertises a DISTINCT extranonce1 (A -> "aaaa0001", else "bbbb0001")
 so the mux can synthesize per-pool sessions and a runner can verify routing.
-After authorize the upstream keeps issuing a fresh *clean* mining.notify every
-~1.2 s with a monotonically increasing job-id, giving the mux clean-job
-boundaries to swap on.
+After authorize the upstream sends one clean mining.notify. With --interval /
+--notify-ms > 0 it ALSO keeps issuing a fresh *clean* notify with a monotonically
+increasing job-id, giving the mux clean-job boundaries to swap on. That periodic
+stream is OFF by default so idle held miners still time out and disconnect (which
+the pre-existing robustness/eviction tests depend on).
 
 Job-id namespace is selectable so a test can force a COLLISION:
     --jobns tag     (default) job-ids are "<tag>-<seq>" (A-0, B-0, ...)
@@ -78,7 +80,10 @@ def handle(conn, tag, logpath, interval, jobns, workless=False):
                                "20000000", "1a2b3c4d", "5e6f7788", clean]}
         def notifier():
             # After authorize, keep feeding fresh clean jobs so the mux has
-            # clean-job boundaries to swap on.
+            # clean-job boundaries to swap on. Opt-in (interval > 0): a periodic
+            # notify stream keeps a held miner's read from ever timing out, which
+            # would wedge tests that rely on idle miners disconnecting on their
+            # own (run_robustness et al.), so it defaults OFF.
             while not stop.wait(interval):
                 try:
                     send(make_notify(True))
@@ -102,7 +107,8 @@ def handle(conn, tag, logpath, interval, jobns, workless=False):
                 send({"id": None, "method": "mining.set_difficulty",
                       "params": [1024]})
                 send(make_notify(True))              # first clean job
-                threading.Thread(target=notifier, daemon=True).start()
+                if interval > 0:                     # opt-in periodic fresh jobs
+                    threading.Thread(target=notifier, daemon=True).start()
             elif m == "mining.submit":
                 params = msg.get("params") or []
                 job = params[1] if len(params) > 1 else "?"
@@ -125,8 +131,8 @@ def main():
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--tag", required=True)
     ap.add_argument("--log", required=True)
-    ap.add_argument("--interval", type=float, default=1.2,
-                    help="seconds between fresh clean notifies")
+    ap.add_argument("--interval", type=float, default=0.0,
+                    help="seconds between fresh clean notifies (0 = off, default)")
     ap.add_argument("--notify-ms", type=int, default=0,
                     help="ms between fresh clean notifies (overrides --interval)")
     ap.add_argument("--jobns", choices=("tag", "shared"), default="tag",
