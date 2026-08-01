@@ -7,6 +7,22 @@
 #ifndef DUALPOOL_SPLITMUX_H
 #define DUALPOOL_SPLITMUX_H
 
+#include <stdbool.h>
+
+/* Share-accounting hook. A split miner's shares are routed to whichever pool owns
+   the job they were found on, so the mux — which relays every pool submit-ack back
+   to the miner — is the only place that can attribute them. It calls this once per
+   routed submit that the owning pool acks.
+
+     pool     0 = A, 1 = B: the pool that ACKED (not the connection's start pool)
+     accepted true on result:true, false on result:false / an error reply
+     diff     the pool difficulty the share was submitted under (its weight)
+     worker   the miner's authorize username, or "" if not yet known
+
+   Runs on the mux's own thread; keep it short and lock-safe. NULL disables it. */
+typedef void (*splitmux_share_cb)(void *ctx, int pool, bool accepted,
+                                  double diff, const char *worker);
+
 /* Runs one split-mode miner. down_fd = miner socket; up_fd[2] = the two ckproxy
    sockets. In M3 only up_fd[0] is used (up_fd[1] == -1). Blocks until the miner
    or the upstream disconnects, then returns. Does NOT close the fds.
@@ -22,6 +38,18 @@
    NOT emit a smooth set_extranonce swap; instead, at the slice deadline it
    shutdown()s down_fd and returns so the miner reconnects (and the splitter
    binds it to the next pool via start_pool). down_fd/up_fd are NOT closed.
+
+   assume_ext (EXPERIMENTAL operator opt-in, default false at every call site):
+   when true the session STARTS already marked set_extranonce-capable, so the
+   deadline path takes the smooth swap even for a miner that never advertised
+   the extension. Intended for ESP-Miner-derived firmware (BitAxe / Hammer /
+   NerdAxe / NerdQAxe), which commonly honours mining.set_extranonce without
+   sending mining.extranonce.subscribe. Nothing else changes — routing, grace,
+   version-rolling, the FIX-11 fresh-job gate and share accounting are
+   identical. With assume_ext == false the mux behaves exactly as before.
+   Caveat: a miner that truly ignores set_extranonce will keep mining the old
+   pool's extranonce1 after a swap and its shares will be rejected, which is why
+   this is opt-in rather than the default.
 
    Asymmetric bring-up (dual mode): the PRIMARY pool is handshaked synchronously
    and the miner starts mining it immediately; the SECONDARY pool is brought up
@@ -42,6 +70,8 @@
    the process. */
 void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
                   int target_shares, int min_s, int max_s, int start_pool,
-                  const char *up_addr[2]);
+                  const char *up_addr[2],
+                  splitmux_share_cb share_cb, void *share_ctx,
+                  bool assume_ext);
 
 #endif /* DUALPOOL_SPLITMUX_H */

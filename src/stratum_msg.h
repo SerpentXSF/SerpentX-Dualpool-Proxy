@@ -40,4 +40,10 @@ int sm_emit_set_difficulty(char *buf, size_t n, double diff);
  * overflow. */
 int sm_emit_set_version_mask(char *buf, size_t n, uint32_t mask);
 
+/* Emit a mining.suggest_difficulty REQUEST (it is a call, so it carries an id —
+ * the mux stamps its own sentinel id so the pool's ack is recognisable as the
+ * mux's own and never relayed to the miner). Return bytes written, -1 on
+ * overflow. */
+int sm_emit_suggest_difficulty(char *buf, size_t n, int64_t id, double diff);
+
 #endif /* DUALPOOL_STRATUM_MSG_H */

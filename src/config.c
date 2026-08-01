@@ -69,6 +69,14 @@ static int int_or(json_t *o, const char *key, int dflt)
     return (v && json_is_integer(v)) ? (int)json_integer_value(v) : dflt;
 }
 
+/* Strict boolean: only a real JSON true/false counts, anything else (absent,
+ * a string, a number) yields the default. Keeps a typo'd opt-in OFF. */
+static bool bool_or(json_t *o, const char *key, bool dflt)
+{
+    json_t *v = json_object_get(o, key);
+    return (v && json_is_boolean(v)) ? json_boolean_value(v) : dflt;
+}
+
 /* Proxy time-slice intervals are minute-scale (unlike the firmware's sub-second
  * slices), so we clamp to [1s, 1h] here rather than reusing dual_clamp_interval. */
 static int clamp_interval_ms(int v)
@@ -126,6 +134,9 @@ int config_parse_string(const char *json, dualpool_config_t *out,
     out->max_slice_s   = int_or(root, "max_slice_s", 120);
     config_clamp_slice_knobs(&out->target_shares, &out->min_slice_s,
                              &out->max_slice_s);
+    /* EXPERIMENTAL opt-in, default OFF: see config.h. Absent or non-boolean =>
+     * false, so existing configs keep today's reconnect-slice behaviour. */
+    out->assume_extranonce = bool_or(root, "assume_extranonce", false);
     copy_str(out->web_password, sizeof(out->web_password),
              json_object_get(root, "web_password"), "");
 

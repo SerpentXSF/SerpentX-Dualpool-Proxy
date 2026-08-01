@@ -49,6 +49,7 @@
 #define SPLITMUX_BUF   131072      /* per-direction line-assembly buffer */
 #define SPLITMUX_LINE  16384       /* max single line we bother to parse */
 #define SPLITMUX_RING  128         /* job-id -> pool routing ring size */
+#define SPLITMUX_PEND  64          /* routed submits awaiting a pool ack */
 #define GRACE_US       30000000LL  /* stale-share grace after leaving a pool */
 #define HS_TIMEOUT_MS  5000        /* per-read handshake timeout (abort dead pool) */
 
@@ -59,6 +60,24 @@
 #define SENTINEL_SUBSCRIBE  90000001LL
 #define SENTINEL_AUTHORIZE  90000002LL
 #define SENTINEL_CONFIGURE  90000003LL
+#define SENTINEL_SUGGEST    90000004LL   /* mux's own mining.suggest_difficulty */
+
+/* Proactive mining.suggest_difficulty (see mux_suggest_check).
+ *
+ * A pool that opens a session at a huge difficulty (Kryptex opens at 1,000,000)
+ * starves a miner that does not send its own suggest_difficulty: at 1,000,000 a
+ * 12.9 TH/s miner finds a share only every ~5.5 min, so the pool's vardiff gets
+ * almost no samples to ramp down with, the miner sees almost no accepted shares,
+ * and its watchdog eventually drops the session and reconnects — forever. The
+ * mux measures the miner's rate anyway (total_work / active time), so it can tell
+ * the pool how big this miner is on the miner's behalf. */
+#define SUGGEST_TARGET_S        15.0        /* aim for ~one share every N seconds */
+#define SUGGEST_DIFF_MIN        1024.0      /* clamp: never suggest below this */
+#define SUGGEST_DIFF_MAX        4194304.0   /* clamp: never suggest above this */
+#define SUGGEST_CLOSE           2.0         /* within this factor: leave the pool alone */
+#define SUGGEST_MISMATCH        4.0         /* beyond this factor: send one suggestion */
+#define SUGGEST_MIN_INTERVAL_US 120000000LL /* at most one per pool per 120 s */
+#define SUGGEST_MIN_SAMPLES     4           /* shares needed before suggesting UP */
 
 /* Asynchronous secondary-pool bring-up. The PRIMARY pool is handshaked
  * synchronously and the miner mines it at once; the SECONDARY is brought up by a
@@ -102,6 +121,13 @@ typedef struct {
     double diff;
     char   cur_job[64];
     char   last_clean_job[64];
+    char   last_shown_job[64];          /* FIX-11: newest job actually PRESENTED to
+                                         * the miner for this pool (swap or active
+                                         * notify). A swap-back never re-presents an
+                                         * already-shown job as forced-clean — that
+                                         * would make the miner flush + re-mine the
+                                         * SAME enonce2 space, i.e. duplicate shares
+                                         * at a low-churn (solo) pool. */
     int64_t left_us;                    /* FIX-2: when the mux last left this pool */
     char    last_notify[SPLITMUX_LINE]; /* FIX-5: latest notify line from this pool */
     size_t  last_notify_len;
@@ -130,7 +156,9 @@ typedef struct {
 
     /* M5 capability detection: true once the miner sends
      * mining.extranonce.subscribe (=> honours set_extranonce, smooth swaps).
-     * false => reconnect-slice fallback at the deadline. */
+     * false => reconnect-slice fallback at the deadline.
+     * Pre-seeded true by the assume_extranonce operator opt-in (see splitmux.h),
+     * which asserts the fleet honours set_extranonce without advertising it. */
     bool     miner_ext_ok;
 
     /* asynchronous secondary-pool bring-up (the pool that is NOT the primary) */
@@ -154,6 +182,12 @@ typedef struct {
     bool        miner_vroll;         /* miner sent mining.configure (version-rolling) */
     uint32_t    miner_vmask_req;     /* mask the miner requested */
     char        miner_cfg[SPLITMUX_LINE]; /* raw miner configure line (replayed to sec) */
+    /* Raw mining.suggest_difficulty from the miner, replayed to the secondary when
+     * it comes up so BOTH pools size this miner the same way (a secondary that
+     * misses it sits at its default difficulty and wrecks the first swap). */
+    char        miner_sugg[512];
+    size_t      miner_sugg_len;
+    uint64_t    routed_shares;   /* submits routed so far — the estimate's sample count */
     bool        vmask_active;        /* version-rolling was granted to the miner */
     uint32_t    vmask;               /* mask currently advertised to the miner */
     int         vmask_pool;          /* pool whose grant the miner was told (-1 none) */
@@ -161,9 +195,44 @@ typedef struct {
     uint32_t    sec_vmask;           /* secondary's granted mask (0 = declined) */
     bool        sec_vmask_applied;   /* reconciled sec grant into set_version_mask */
 
+    /* Difficulty presented to the miner: always the ACTIVE pool's own value (see
+     * emit_miner_diff). Telling it max(diffA, diffB) instead was tried and
+     * REVERTED — it does remove the "Above target" rejects that a difficulty
+     * change strands in-flight work into, but a pool credits a share at the
+     * difficulty IT assigned, so mining at the higher pool's difficulty silently
+     * throws away the difference on every share routed to the lower one. Measured
+     * live: ~31% of credited hashrate lost. Per-pool difficulty credits every
+     * share in full and costs only the few shares in flight across a change. */
+    double      miner_diff;      /* what the miner was last told (0 = nothing yet) */
+
+    /* Share accounting: a routed submit is pending until its owning pool acks it.
+     * The ring correlates the ack (by JSON-RPC id) back to the pool it was routed
+     * to and the difficulty it was submitted under, so the callback can attribute
+     * the share to the right pool. Oldest entry is overwritten on overflow. */
+    struct {
+        int64_t id;
+        int     pool;
+        double  diff;
+        bool    used;
+    }           pend[SPLITMUX_PEND];
+    int         pend_head;
+    splitmux_share_cb share_cb;
+    void       *share_ctx;
+
+    /* Proactive mining.suggest_difficulty rate limiting: when the mux last sent a
+     * suggestion of its own to each pool (0 = never). Reset for a pool whose
+     * session is re-established, since a fresh session starts back at that pool's
+     * default difficulty. */
+    int64_t     sugg_last_us[2];
+
     linebuf_t bmin;              /* miner  -> mux */
     linebuf_t bup[2];            /* upstream[p] -> mux */
 } mux_t;
+
+/* Defined further down (it needs the emit helpers): tell the miner `pool`'s
+ * difficulty if that differs from what it was last told. Declared here because
+ * both the swap path and the upstream set_difficulty handler call it. */
+static int emit_miner_diff(mux_t *m, int pool);
 
 static int64_t now_us(void)
 {
@@ -222,6 +291,58 @@ static int smx_vroll_off(void)
         /* Treat unset, empty, and "0" all as OFF-disabled (so an empty export
          * from a test wrapper does not accidentally revert the relay). */
         cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Test-only negative control (SPLITMUX_SWAP_REPRESENT=1, one cached getenv):
+ * revert FIX-11 to the OLD behaviour — on every swap-back force-clean re-present
+ * the target's CURRENT job even when the miner was already shown it, and fire an
+ * armed swap on any target notify regardless of whether the job is new. This
+ * reproduces the RED (duplicate-share) swap behaviour so one binary can show
+ * RED (rejects) vs GREEN (no dupes). Unset in production. */
+static int smx_swap_represent(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("SPLITMUX_SWAP_REPRESENT");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Test-only negative control (SPLITMUX_NO_SUGGEST=1, one cached getenv): never
+ * send the mux's OWN mining.suggest_difficulty, i.e. the pre-fix behaviour where
+ * a pool that opens at a huge difficulty is left there. Lets one binary show RED
+ * (pool stuck at its opening difficulty, ~no shares) vs GREEN (pool comes down).
+ * Unset in production. Note this does NOT touch the relay/replay of a suggestion
+ * the MINER sent — only the mux's own. */
+static int smx_no_suggest(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("SPLITMUX_NO_SUGGEST");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Seconds-per-share the suggested difficulty aims for. SUGGEST_TARGET_S (15 s)
+ * in production; SPLITMUX_SUGGEST_TARGET_S (test-only, one cached getenv, range
+ * [0.1, 600]) compresses that time constant so an integration test can reproduce
+ * the "pool opened far too high" failure in seconds instead of the ~4 minutes the
+ * real 15 s constant implies at a 16x mismatch. Unset in production. */
+static double smx_suggest_target_s(void)
+{
+    static double cached = -1.0;
+    if (cached < 0.0) {
+        cached = SUGGEST_TARGET_S;
+        const char *v = getenv("SPLITMUX_SUGGEST_TARGET_S");
+        if (v && v[0]) {
+            double d = strtod(v, NULL);
+            if (d >= 0.1 && d <= 600.0)
+                cached = d;
+        }
     }
     return cached;
 }
@@ -795,10 +916,19 @@ static int primary_handshake(mux_t *m)
             if (smx_vroll_off() || !m->miner_vroll) {
                 /* Test negative control, or a configure with no version-rolling:
                  * forward to BOTH pools (sentinel) and answer {} as before. */
-                smx_dbg("primary: configure relay OFF/none — forwarding to BOTH "
-                        "pools, answering miner {}\n");
-                if (forward_with_id(m->pool[0].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
-                if (forward_with_id(m->pool[1].fd, line, SENTINEL_CONFIGURE) < 0) return -1;
+                smx_dbg("primary: configure relay OFF/none — forwarding to both "
+                        "CONNECTED pools, answering miner {}\n");
+                /* Only forward to a pool that is actually connected. A pool whose
+                 * ckproxy was still warming when the miner arrived is legitimately
+                 * fd -1 here (the async secondary dials it later), and writing to
+                 * -1 would fail the handshake and drop the miner — which for a
+                 * miner that does NOT request version-rolling would repeat for the
+                 * whole outage, mining nothing while one pool is down. */
+                for (int q = 0; q < 2; q++) {
+                    if (m->pool[q].fd >= 0 &&
+                        forward_with_id(m->pool[q].fd, line, SENTINEL_CONFIGURE) < 0)
+                        return -1;
+                }
                 if (reply_configure_miner(m, msg.id, false, 0) < 0) return -1;
                 continue;
             }
@@ -983,6 +1113,126 @@ static int primary_handshake(mux_t *m)
     return primary;
 }
 
+/* ---- proactive mining.suggest_difficulty --------------------------------- */
+
+/* Current hashrate estimate in H/s, or 0.0 when there is not enough data yet.
+ *
+ * total_work is the sum of diff * 2^32 over every submit the mux ROUTED, so
+ * work / active-seconds is this miner's rate. a_us/b_us only carry time BANKED at
+ * slice boundaries, so the IN-PROGRESS slice has to be added explicitly: without
+ * it the estimate reads 0 for the whole first slice, and the first slice is
+ * exactly the window in which a pool that opened at 1,000,000 is starving the
+ * miner. (next_slice_us deliberately keeps its own banked-only figure — it is
+ * part of the slice sizer and is left byte-for-byte as it was.)
+ *
+ * Between shares the numerator is fixed while the denominator grows, so the
+ * estimate DECAYS towards the next share — it errs low, which suggests an easier
+ * difficulty, which is the safe direction. */
+static double mux_hashrate(const mux_t *m, int64_t t)
+{
+    if (m->total_work <= 0.0)
+        return 0.0;
+    double active_us = (double)(m->a_us + m->b_us);
+    if (m->slice_start_us > 0 && t > m->slice_start_us)
+        active_us += (double)(t - m->slice_start_us);   /* unbanked, in progress */
+    if (active_us <= 0.0)
+        return 0.0;
+    return m->total_work / (active_us / 1e6);
+}
+
+/* Difficulty that yields roughly one share every smx_suggest_target_s() seconds
+ * at `hr` H/s: diff = hr * target_s / 2^32. Clamped to [SUGGEST_DIFF_MIN,
+ * SUGGEST_DIFF_MAX] and rounded to the nearest power of two (pools snap to powers
+ * of two anyway, and rounding stops a drifting estimate from producing a slightly
+ * different suggestion every time). Returns 0.0 for a zero/absent estimate. */
+static double suggest_target_diff(double hr)
+{
+    if (hr <= 0.0)
+        return 0.0;
+    double d = hr * smx_suggest_target_s() / 4294967296.0;
+    if (d < SUGGEST_DIFF_MIN) d = SUGGEST_DIFF_MIN;
+    if (d > SUGGEST_DIFF_MAX) d = SUGGEST_DIFF_MAX;
+    /* Nearest power of two on a log scale: step up while d is above the
+     * geometric midpoint (p * sqrt(2)) of the current step and the next. */
+    double p = SUGGEST_DIFF_MIN;
+    while (p * 2.0 <= SUGGEST_DIFF_MAX && p * 1.4142135623730951 < d)
+        p *= 2.0;
+    return p;
+}
+
+/* Send the mux's OWN mining.suggest_difficulty to pool p under SENTINEL_SUGGEST
+ * (handle_upstream_line drops that ack, so it never reaches the miner or the
+ * share-accounting ring). Records the send for rate limiting. Returns 0, or -1 if
+ * the pool's socket died. */
+static int suggest_send(mux_t *m, int p, double diff, int64_t t, const char *why)
+{
+    if (m->pool[p].fd < 0 || diff <= 0.0)
+        return 0;
+    char buf[192];
+    int n = sm_emit_suggest_difficulty(buf, sizeof buf - 1, SENTINEL_SUGGEST, diff);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\n';
+    m->sugg_last_us[p] = t;
+    smx_dbg("suggest: pool %c (%s) estimate %.2f TH/s -> suggesting difficulty "
+            "%.0f (pool is at %.0f)\n", p == 0 ? 'A' : 'B', why,
+            mux_hashrate(m, t) / 1e12, diff, m->pool[p].diff);
+    smx_dbg_line("TX", p, buf, (size_t)n + 1);
+    return write_all(m->pool[p].fd, buf, (size_t)n + 1);
+}
+
+/* Periodic check (driven from the poll loop): suggest a sane difficulty to any
+ * pool whose current difficulty is badly mismatched to the measured rate.
+ *
+ * Deliberately timid — this is a hint sent on the miner's behalf, not a control
+ * loop:
+ *   - a miner that sends its OWN suggest_difficulty is never overridden (that one
+ *     is already relayed to both pools and replayed to a late secondary);
+ *   - a pool already within SUGGEST_CLOSE (2x) of target is left alone;
+ *   - only a mismatch beyond SUGGEST_MISMATCH (4x, either direction) is worth a
+ *     word, and then at most one per pool per SUGGEST_MIN_INTERVAL_US.
+ * Vardiff does the rest; the mux only breaks the deadlock where the pool cannot
+ * ramp because the miner cannot find shares fast enough to give it samples. */
+static void mux_suggest_check(mux_t *m, int64_t t)
+{
+    if (smx_no_suggest() || m->miner_sugg_len > 0)
+        return;
+    double want = suggest_target_diff(mux_hashrate(m, t));
+    if (want <= 0.0)
+        return;                       /* no estimate yet: nothing honest to say */
+    for (int p = 0; p < 2; p++) {
+        if (m->pool[p].fd < 0)
+            continue;
+        if (p == m->sec && m->sec_state != SEC_READY)
+            continue;                 /* mid-bring-up: sec_send_handshake covers it */
+        double d = m->pool[p].diff;
+        if (d <= 0.0)
+            continue;                 /* this pool has not stated a difficulty yet */
+        if (d <= want * SUGGEST_CLOSE && d * SUGGEST_CLOSE >= want)
+            continue;                 /* within 2x: close enough, say nothing */
+        if (d <= want * SUGGEST_MISMATCH && d * SUGGEST_MISMATCH >= want)
+            continue;                 /* off, but not badly: leave it to vardiff */
+        if (m->sugg_last_us[p] != 0 &&
+            t - m->sugg_last_us[p] < SUGGEST_MIN_INTERVAL_US)
+            continue;                 /* rate limit: never spam a pool */
+        /* Asking a pool to make work HARDER needs evidence. Share timing is
+         * Poisson, so one lucky early share reads several times the true rate —
+         * acting on it would raise the difficulty, starve the miner, and the rate
+         * limit would then pin it there for two minutes: exactly the starvation
+         * this feature exists to prevent. Requiring a few samples costs nothing,
+         * because the case that actually matters (a pool opening far too HIGH)
+         * is a downward suggestion and stays first-sample responsive. */
+        if (want > d && m->routed_shares < SUGGEST_MIN_SAMPLES) {
+            smx_dbg("suggest: pool %c would go UP (%.0f -> %.0f) but only %llu "
+                    "share(s) sampled — waiting for %d\n", p == 0 ? 'A' : 'B',
+                    d, want, (unsigned long long)m->routed_shares,
+                    SUGGEST_MIN_SAMPLES);
+            continue;
+        }
+        (void)suggest_send(m, p, want, t, "difficulty mismatched");
+    }
+}
+
 /* ------------------- asynchronous secondary-pool bring-up ---------------- */
 
 static int lb_fill(int fd, linebuf_t *lb);   /* defined with the dual poll loop */
@@ -1021,6 +1271,26 @@ static int sec_send_handshake(mux_t *m)
     int rc = write_all(fd, ad, strlen(ad));
     if (rc == 0) rc = write_all(fd, "\n", 1);
     free(ad);
+    /* Replay the miner's suggest_difficulty so this pool sizes it like the other
+     * one. Without it the secondary keeps its default difficulty and the first
+     * swap onto it hands the miner work orders of magnitude too hard. */
+    if (rc == 0 && m->miner_sugg_len > 0) {
+        smx_dbg("secondary(%c): replaying miner suggest_difficulty\n",
+                m->sec == 0 ? 'A' : 'B');
+        smx_dbg_line("TX", m->sec, m->miner_sugg, m->miner_sugg_len);
+        rc = write_all(fd, m->miner_sugg, m->miner_sugg_len);
+    } else if (rc == 0 && !smx_no_suggest()) {
+        /* The miner never sent one, so suggest on its behalf from the measured
+         * rate. This is the common case for the mux's own suggestion: the primary
+         * has usually been mining long enough to have an estimate by the time the
+         * secondary comes up, and a fresh session otherwise opens at whatever this
+         * pool's default is (1,000,000 at some pools) — which the first swap onto
+         * it would then hand to the miner. */
+        int64_t t = now_us();
+        double want = suggest_target_diff(mux_hashrate(m, t));
+        if (want > 0.0)
+            rc = suggest_send(m, m->sec, want, t, "secondary bring-up");
+    }
     return rc;
 }
 
@@ -1073,6 +1343,10 @@ static void sec_begin_attempt(mux_t *m, int64_t t)
     m->pool[p].last_notify_len = 0;
     m->pool[p].enonce1[0] = '\0';
     m->sec_state = SEC_HANDSHAKING;
+    /* A new session starts back at this pool's default difficulty, so the
+     * suggestion rate limit starts fresh with it (the limit exists to stop the
+     * mux nagging ONE session, not to ration sessions). */
+    m->sugg_last_us[p] = 0;
     m->sec_attempt_deadline_us = t + (int64_t)SEC_ATTEMPT_MS * 1000LL;
     if (sec_send_handshake(m) < 0)
         sec_fail(m, t);
@@ -1219,19 +1493,23 @@ static int do_swap(mux_t *m, const char *notify_line, size_t nlen, int64_t t)
         buf[n] = '\n';
         if (write_all(m->down_fd, buf, (size_t)n + 1) < 0) return -1;
     }
-    n = sm_emit_set_difficulty(buf, sizeof buf - 1, tp->diff);
-    if (n > 0) {
-        buf[n] = '\n';
-        if (write_all(m->down_fd, buf, (size_t)n + 1) < 0) return -1;
-    }
+    /* Hand the miner the TARGET pool's difficulty (m->active still points at the
+     * pool we are leaving at this point, so pass tgt explicitly). */
+    if (emit_miner_diff(m, tgt) < 0)
+        return -1;
     if (write_all(m->down_fd, notify_line, nlen) < 0)
         return -1;
 
     /* FIX-3: this notify's job is now shown to the miner — record it, tagged to
-     * the target pool, so a later submit for it routes to the right pool. */
+     * the target pool, so a later submit for it routes to the right pool.
+     * FIX-11: remember it as this pool's last-shown job so a subsequent swap-back
+     * won't force-clean re-present the same job (which would cause duplicates). */
     stratum_msg_t nm;
-    if (stratum_msg_parse(notify_line, &nm) == 0 && nm.type == SM_NOTIFY)
+    if (stratum_msg_parse(notify_line, &nm) == 0 && nm.type == SM_NOTIFY) {
         ring_add(&m->ring, nm.job_id, tgt, t);
+        snprintf(m->pool[tgt].last_shown_job,
+                 sizeof m->pool[tgt].last_shown_job, "%s", nm.job_id);
+    }
 
     /* FIX-2: remember when we left the departing pool so its stale-share grace
      * runs from the SWAP moment, not from that pool's last (possibly old) notify. */
@@ -1242,6 +1520,45 @@ static int do_swap(mux_t *m, const char *notify_line, size_t nlen, int64_t t)
     m->active = tgt;
     m->pending = false;
     m->slice_deadline_us = t + next_slice_us(m, tgt);
+    return 0;
+}
+
+/* Share accounting (defined below, next to the submit router that records into
+ * the pending ring): resolve a pool ack into an accepted/rejected tally. */
+static void pend_resolve(mux_t *m, int64_t id, bool accepted);
+
+/* Tell the miner the difficulty of `pool` — the one whose work it is about to be
+ * mining (see mux_t.miner_diff for why this is per-pool and not max(A,B)). Emits
+ * only on a real change, so a pool re-announcing the same difficulty costs
+ * nothing. A pool whose difficulty is still unknown (0) is ignored. Returns 0, or
+ * -1 on a miner write failure. */
+static int emit_miner_diff(mux_t *m, int pool)
+{
+    /* Present the ACTIVE pool's difficulty. Telling the miner max(diffA,diffB)
+     * instead does eliminate "Above target" rejects, but it silently costs real
+     * money: a pool credits a share at the difficulty IT assigned, so mining at
+     * the higher pool's difficulty means every share routed to the lower one is
+     * credited a fraction of the work it actually represents. Measured live: with
+     * A=4096, B=8192 and 70% of shares going to A, credited hashrate came out
+     * ~31% below the miner's real rate — matching the predicted 0.70 x 50%.
+     * Per-pool difficulty credits every share in full; the cost is a few shares
+     * stranded mid-flight whenever a pool moves its difficulty, which is far
+     * cheaper than a permanent ~third of the hashrate. */
+    double want = m->pool[pool].diff;
+    if (want <= 0.0 || want == m->miner_diff)
+        return 0;
+    char buf[128];
+    int n = sm_emit_set_difficulty(buf, sizeof buf - 1, want);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\n';
+    smx_dbg("diff: pools A=%.0f B=%.0f -> telling miner pool %c diff %.0f (was %.0f)\n",
+            m->pool[0].diff, m->pool[1].diff, pool == 0 ? 'A' : 'B',
+            want, m->miner_diff);
+    smx_dbg_line("TX", -1, buf, (size_t)n + 1);
+    if (write_all(m->down_fd, buf, (size_t)n + 1) < 0)
+        return -1;
+    m->miner_diff = want;
     return 0;
 }
 
@@ -1257,12 +1574,12 @@ static int handle_upstream_line(mux_t *m, int p, const char *line, size_t len)
 
     if (msg.type == SM_SET_DIFFICULTY) {
         m->pool[p].diff = msg.diff;
-        /* FIX-4: the ACTIVE pool's diff must always reach the miner (else it
-         * mines an outdated diff and gets low-diff rejects). The target pool's
-         * diff (p != active) is delivered by the swap's set_difficulty emit. */
-        if (p == m->active)
-            return write_all(m->down_fd, line, len);
-        return 0;
+        /* Only the pool the miner is currently mining sets its difficulty. The
+         * other pool's value is remembered and applied when we swap to it, so a
+         * background vardiff move on the idle pool never disturbs live work. */
+        if (p != m->active)
+            return 0;
+        return emit_miner_diff(m, p);
     }
 
     if (msg.type == SM_NOTIFY) {
@@ -1279,15 +1596,24 @@ static int handle_upstream_line(mux_t *m, int p, const char *line, size_t len)
             m->pool[p].last_notify_len = len;
         }
 
-        /* FIX-5: an armed swap fires on the target's very next notify (any
-         * clean flag) — no waiting for a rare clean_jobs==true. */
-        if (m->pending && p == m->target)
+        /* FIX-5: an armed swap fires on the target's next notify — no waiting for
+         * a rare clean_jobs==true.
+         * FIX-11: but only on a FRESH job (one the miner has not already been
+         * shown for this pool). A pool that merely RE-broadcasts the same job
+         * must not trigger a swap that force-cleans work the miner already did on
+         * it (duplicate shares); keep waiting for genuinely new work instead. */
+        if (m->pending && p == m->target &&
+            (smx_swap_represent() ||
+             strcmp(msg.job_id, m->pool[p].last_shown_job) != 0))
             return do_swap(m, line, len, t);
 
         if (p == m->active) {
             /* FIX-3: record ONLY jobs actually shown to the miner, tagged with
-             * the owning pool, so overlapping id namespaces cannot cross-route. */
+             * the owning pool, so overlapping id namespaces cannot cross-route.
+             * FIX-11: also track it as this pool's last-shown job. */
             ring_add(&m->ring, msg.job_id, p, t);
+            snprintf(m->pool[p].last_shown_job,
+                     sizeof m->pool[p].last_shown_job, "%s", msg.job_id);
             return write_all(m->down_fd, line, len);
         }
 
@@ -1302,8 +1628,23 @@ static int handle_upstream_line(mux_t *m, int p, const char *line, size_t len)
          * Each submit goes to exactly one pool and miner submit ids are unique,
          * so no id translation is needed. */
         if (msg.id == SENTINEL_SUBSCRIBE || msg.id == SENTINEL_AUTHORIZE ||
-            msg.id == SENTINEL_CONFIGURE)
+            msg.id == SENTINEL_CONFIGURE || msg.id == SENTINEL_SUGGEST)
             return 0;
+        /* If this acks a share we routed, tally it before relaying. A share is
+         * accepted only on result:true; result:false or an error reply is a
+         * reject. Non-submit acks simply won't match the pending ring. */
+        if (m->share_cb) {
+            json_error_t je;
+            json_t *rj = json_loads(line, 0, &je);
+            if (rj) {
+                json_t *res = json_object_get(rj, "result");
+                json_t *err = json_object_get(rj, "error");
+                bool ok = json_is_true(res) &&
+                          !(err && !json_is_null(err));
+                pend_resolve(m, msg.id, ok);
+                json_decref(rj);
+            }
+        }
         return write_all(m->down_fd, line, len);
     }
 
@@ -1311,9 +1652,44 @@ static int handle_upstream_line(mux_t *m, int p, const char *line, size_t len)
     return 0;
 }
 
+/* ---- share accounting: correlate a routed submit with its pool's ack ------ */
+
+/* Remember a submit we just routed, so its ack can be attributed to `pool` at the
+ * difficulty it was submitted under. Ignores id<0 (a submit with no integer id
+ * can never be correlated). Oldest entry is overwritten when the ring is full. */
+static void pend_add(mux_t *m, int64_t id, int pool, double diff)
+{
+    if (!m->share_cb || id < 0)
+        return;
+    m->pend[m->pend_head].id = id;
+    m->pend[m->pend_head].pool = pool;
+    m->pend[m->pend_head].diff = diff;
+    m->pend[m->pend_head].used = true;
+    m->pend_head = (m->pend_head + 1) % SPLITMUX_PEND;
+}
+
+/* Resolve a pool ack against the pending ring and report the share. An id we
+ * never recorded (or already consumed) is ignored, so nothing is double counted. */
+static void pend_resolve(mux_t *m, int64_t id, bool accepted)
+{
+    if (!m->share_cb || id < 0)
+        return;
+    for (int k = 0; k < SPLITMUX_PEND; k++) {
+        if (!m->pend[k].used || m->pend[k].id != id)
+            continue;
+        m->pend[k].used = false;
+        smx_dbg("share: id=%lld pool %c %s (diff %.0f)\n", (long long)id,
+                m->pend[k].pool == 0 ? 'A' : 'B',
+                accepted ? "ACCEPTED" : "REJECTED", m->pend[k].diff);
+        m->share_cb(m->share_ctx, m->pend[k].pool, accepted, m->pend[k].diff,
+                    m->worker);
+        return;
+    }
+}
+
 /* Route one miner submit to its owning pool (verbatim), or drop it. */
-static int handle_submit(mux_t *m, const char *job_id, const char *line,
-                         size_t len)
+static int handle_submit(mux_t *m, int64_t id, const char *job_id,
+                         const char *line, size_t len)
 {
     int64_t t = now_us();
     int pool = m->active;               /* unknown job-id -> active fallback */
@@ -1337,7 +1713,16 @@ static int handle_submit(mux_t *m, const char *job_id, const char *line,
     smx_dbg_line("TX", pool, line, len);
     if (write_all(m->pool[pool].fd, line, len) < 0)
         return -1;
-    m->total_work += m->pool[pool].diff * 4294967296.0;
+    /* Weight by the ROUTED pool's difficulty — that is what this pool credits the
+     * share at, so it is what the dashboard and the slice sizer should see. (Using
+     * the miner's currently-advertised difficulty instead mis-weights a share that
+     * the grace window routes back to the pool we just left, since it was mined at
+     * that pool's difficulty, not the new one's.) */
+    double w = m->pool[pool].diff > 0.0 ? m->pool[pool].diff : m->miner_diff;
+    m->total_work += w * 4294967296.0;
+    m->routed_shares++;
+    /* Pending until this pool acks it (the ack is what tells us accept/reject). */
+    pend_add(m, id, pool, w);
     return 0;
 }
 
@@ -1379,15 +1764,40 @@ static int process_lines(mux_t *m, linebuf_t *lb, bool from_up, int p)
                 stratum_msg_t msg;
                 bool parsed = (stratum_msg_parse(tmp, &msg) == 0);
                 if (parsed && msg.type == SM_SUBMIT) {
-                    if (handle_submit(m, msg.job_id, tmp, linelen) < 0) { rc = -1; break; }
+                    if (handle_submit(m, msg.id, msg.job_id, tmp, linelen) < 0) { rc = -1; break; }
                 } else {
                     /* M5: a post-authorize extranonce.subscribe still marks the
                      * miner as set_extranonce-capable (smooth-swap path). */
                     if (parsed && msg.type == SM_EXTRANONCE_SUBSCRIBE)
                         m->miner_ext_ok = true;
-                    /* non-submit miner chatter -> active pool */
-                    smx_dbg("miner chatter -> active pool %c\n",
-                            m->active == 0 ? 'A' : 'B');
+                    /* mining.suggest_difficulty tells a pool how to size THIS
+                     * miner. It must reach BOTH pools: sending it only to the
+                     * active one leaves the other at its default (e.g. 1000000)
+                     * until its own vardiff crawls down, so the next swap hands a
+                     * big miner a difficulty orders of magnitude too high — it
+                     * finds almost nothing, in-flight shares reject "Above
+                     * target", and the firmware eventually reconnects. Broadcast
+                     * it (and any similarly session-scoped hint) to every
+                     * connected pool; the reply the miner sees is the active
+                     * pool's, which is the one it is mining. */
+                    bool broadcast = (strstr(tmp, "\"mining.suggest_difficulty\"") != NULL);
+                    if (broadcast && linelen < sizeof m->miner_sugg) {
+                        memcpy(m->miner_sugg, tmp, linelen);
+                        m->miner_sugg[linelen] = '\0';
+                        m->miner_sugg_len = linelen;   /* replayed to a late secondary */
+                    }
+                    if (broadcast) {
+                        smx_dbg("miner chatter -> BOTH pools (session-scoped hint)\n");
+                        for (int q = 0; q < 2; q++) {
+                            if (q == m->active || m->pool[q].fd < 0)
+                                continue;
+                            smx_dbg_line("TX", q, tmp, linelen);
+                            (void)write_all(m->pool[q].fd, tmp, linelen);
+                        }
+                    } else {
+                        smx_dbg("miner chatter -> active pool %c\n",
+                                m->active == 0 ? 'A' : 'B');
+                    }
                     smx_dbg_line("TX", m->active, tmp, linelen);
                     if (write_all(m->pool[m->active].fd, tmp, linelen) < 0) { rc = -1; break; }
                 }
@@ -1458,6 +1868,8 @@ static int handle_pool_readable(mux_t *m, int p)
                 if (reconcile_mask(m, sm) < 0)
                     return -1;
             }
+            /* The secondary's difficulty is now known, but the miner is on the
+             * primary — it will be applied by the swap that moves work there. */
             /* drain any lines already buffered past the first notify */
             if (process_lines(m, &m->bup[p], true, p) < 0)
                 return -1;
@@ -1487,8 +1899,21 @@ static void splitmux_dual(mux_t *m)
     m->sec_degrade_logged = false;
 
     int64_t t0 = now_us();
-    /* Secondary pool: kick off the async bring-up on its already-connected fd. */
-    sec_begin_attempt(m, t0);
+    if (m->pool[m->sec].fd < 0) {
+        /* The secondary wasn't connectable when the miner arrived — typically its
+         * ckproxy is still warming up. Do NOT dial+subscribe it immediately (that
+         * no-work window is exactly what can SIGABRT stock ckpool); wait one
+         * backoff and let the retry path bring it up when it's ready. */
+        m->sec_state = SEC_WAIT;
+        m->sec_retry_at_us = t0 + (int64_t)SEC_BACKOFF_MIN * 1000000LL;
+        fprintf(stderr, "splitmux: secondary pool %c not connected yet — will "
+                        "bring it up in %ds (miner mines pool %c meanwhile)\n",
+                m->sec == 0 ? 'A' : 'B', SEC_BACKOFF_MIN,
+                primary == 0 ? 'A' : 'B');
+    } else {
+        /* Secondary already connected: kick off its async bring-up now. */
+        sec_begin_attempt(m, t0);
+    }
 
     m->slice_start_us = t0;
     m->slice_deadline_us = t0 + next_slice_us(m, m->active);
@@ -1545,6 +1970,12 @@ static void splitmux_dual(mux_t *m)
         /* Deadline check (fires on data or on the 200 ms timeout), AFTER the
          * buffered submits above have been routed under the old active pool. */
         t = now_us();
+
+        /* Tell a badly-mismatched pool how big this miner is (rate-limited, and
+         * never when the miner sends its own suggest_difficulty). Cheap enough to
+         * run on every loop tick; it self-limits. */
+        mux_suggest_check(m, t);
+
         if (!m->pending && t >= m->slice_deadline_us) {
             bank_slice(m, t);            /* bank the finished slice first */
             int tgt = split_sched_next_pool(m->active, m->a_us, m->b_us,
@@ -1567,8 +1998,21 @@ static void splitmux_dual(mux_t *m)
                     m->target = tgt;
                     /* FIX-5: if the target has already sent a notify, swap NOW
                      * onto its current job (rewritten clean_jobs=true) instead of
-                     * waiting for its next clean notify. */
-                    if (m->pool[tgt].last_notify_len > 0) {
+                     * waiting for its next clean notify.
+                     * FIX-11: but ONLY when that job is one the miner has not been
+                     * shown for this pool yet (genuinely fresh work). Re-presenting
+                     * an already-shown job as forced-clean makes the miner discard
+                     * its progress and re-mine the identical enonce2 space, so it
+                     * resubmits shares it already sent — duplicates that a low-churn
+                     * solo pool rejects (a high-churn pool dodges this because each
+                     * swap-back lands on a new job). When the target has nothing
+                     * newer, arm the swap to fire on its next FRESH notify and keep
+                     * the miner productive on the current pool meanwhile, rather
+                     * than manufacturing duplicate work. */
+                    if (m->pool[tgt].last_notify_len > 0 &&
+                        (smx_swap_represent() ||
+                         strcmp(m->pool[tgt].cur_job,
+                                m->pool[tgt].last_shown_job) != 0)) {
                         char nb[SPLITMUX_LINE];
                         size_t nl;
                         if (rewrite_notify_clean(m->pool[tgt].last_notify,
@@ -1578,7 +2022,7 @@ static void splitmux_dual(mux_t *m)
                             m->pending = true;
                         }
                     } else {
-                        m->pending = true;   /* swap on its first notify */
+                        m->pending = true;   /* swap on the target's next fresh notify */
                     }
                 }
             } else {
@@ -1590,16 +2034,31 @@ static void splitmux_dual(mux_t *m)
 
 void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
                   int target_shares, int min_s, int max_s, int start_pool,
-                  const char *up_addr[2])
+                  const char *up_addr[2],
+                  splitmux_share_cb share_cb, void *share_ctx,
+                  bool assume_ext)
 {
-    if (up_fd[1] < 0) {
-        /* Single-pool passthrough (M3 / fallback): scheduler knobs + up_addr
-         * unused (no secondary to reconnect). */
+    /* Pure passthrough only when there is genuinely NO second pool — i.e. the
+     * caller supplied no address for it (the M3 single-upstream probe). A second
+     * pool that merely isn't CONNECTED yet (fd < 0 but an address given, e.g. its
+     * ckproxy is still warming up after a restart) takes the normal dual path: the
+     * async secondary bring-up dials it and retries with backoff, so the session
+     * becomes a real split once that pool is ready instead of being pinned
+     * single-pool for its entire life. Miners reconnect within seconds of a
+     * restart, so without this virtually every session after a restart would be
+     * stuck on one pool. */
+    bool have_sec_addr = up_addr && up_addr[1] && up_addr[1][0];
+    if (up_fd[1] < 0 && !have_sec_addr) {
+        /* Byte-relay: never parses submits/acks — the caller's own sniffer
+         * accounts for this path. */
         (void)ratio_a; (void)target_shares; (void)min_s; (void)max_s;
-        (void)start_pool; (void)up_addr;
+        (void)start_pool; (void)share_cb; (void)share_ctx;
+        (void)assume_ext;   /* no slices in single-pool mode: nothing to swap */
         splitmux_passthrough(down_fd, up_fd[0]);
         return;
     }
+    if (up_fd[0] < 0 && up_fd[1] < 0)
+        return;             /* neither pool connected: caller closes and retries */
 
     mux_t m;
     memset(&m, 0, sizeof m);
@@ -1612,8 +2071,16 @@ void splitmux_run(int down_fd, int up_fd[2], int ratio_a,
     m.min_s = min_s;
     m.max_s = max_s;
     m.start_pool = start_pool;
+    /* EXPERIMENTAL opt-in: start the session already marked set_extranonce-
+     * capable so the deadline takes the smooth swap instead of the M5
+     * reconnect-slice fallback. Default (false) leaves the memset zero, i.e.
+     * capability is detected from mining.extranonce.subscribe exactly as before. */
+    if (assume_ext)
+        m.miner_ext_ok = true;
     m.up_addr[0] = up_addr ? up_addr[0] : NULL;
     m.up_addr[1] = up_addr ? up_addr[1] : NULL;
+    m.share_cb = share_cb;
+    m.share_ctx = share_ctx;
     splitmux_dual(&m);
 
     /* The secondary fd may have been closed/reopened during retries — hand the

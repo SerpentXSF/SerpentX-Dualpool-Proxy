@@ -91,6 +91,45 @@ static void test_hashrate_split(void) {
     assert(c.max_slice_s == 120);
 }
 
+/* EXPERIMENTAL assume_extranonce opt-in: absent => false (today's reconnect-slice
+ * behaviour), explicit true => true, and a non-boolean value stays false so a
+ * typo cannot silently enable it. */
+static void test_assume_extranonce(void) {
+    const char *pools =
+        "  \"pools\": ["
+        "    {\"url\":\"a:1\",\"user\":\"u\",\"pass\":\"p\"},"
+        "    {\"url\":\"b:2\",\"user\":\"u\",\"pass\":\"p\"} ] }";
+    char j[512];
+    dualpool_config_t c; char err[256];
+
+    /* absent -> false (default OFF) */
+    snprintf(j, sizeof(j), "{ \"mode\": \"hashrate_split\",%s", pools);
+    assert(config_parse_string(j, &c, err, sizeof(err)) == 0);
+    assert(c.assume_extranonce == false);
+
+    /* explicit true -> true */
+    snprintf(j, sizeof(j),
+             "{ \"mode\": \"hashrate_split\", \"assume_extranonce\": true,%s", pools);
+    assert(config_parse_string(j, &c, err, sizeof(err)) == 0);
+    assert(c.assume_extranonce == true);
+
+    /* explicit false -> false */
+    snprintf(j, sizeof(j),
+             "{ \"mode\": \"hashrate_split\", \"assume_extranonce\": false,%s", pools);
+    assert(config_parse_string(j, &c, err, sizeof(err)) == 0);
+    assert(c.assume_extranonce == false);
+
+    /* non-boolean (a string) -> stays false, never coerced on */
+    snprintf(j, sizeof(j),
+             "{ \"mode\": \"hashrate_split\", \"assume_extranonce\": \"true\",%s", pools);
+    assert(config_parse_string(j, &c, err, sizeof(err)) == 0);
+    assert(c.assume_extranonce == false);
+
+    /* and the FULL farm_split config (which never mentions it) is unaffected */
+    assert(config_parse_string(FULL, &c, err, sizeof(err)) == 0);
+    assert(c.assume_extranonce == false);
+}
+
 /* D4: the hashrate_split slice knobs are clamped and min<=max is enforced. */
 static void test_slice_knobs_clamped(void) {
     /* over-range + inverted: target too big, min too big, max = 0 (the churn
@@ -204,6 +243,7 @@ int main(void) {
     test_parse_full();
     test_defaults();
     test_hashrate_split();
+    test_assume_extranonce();
     printf("config: parse full + defaults passed\n");
     test_ratio_clamped();
     test_slice_knobs_clamped();

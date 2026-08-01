@@ -80,6 +80,22 @@ static void test_emit_set_version_mask(void){
         "{\"id\":null,\"method\":\"mining.set_version_mask\",\"params\":[\"00000000\"]}")==0);
 }
 
+static void test_emit_suggest_difficulty(void){
+    char buf[256];
+    /* The mux sends this on the miner's behalf under a SENTINEL id (90000004) so
+     * the pool's ack is recognisably its own and never relayed to the miner. The
+     * id MUST survive the round trip, or the ack would be mistaken for a submit
+     * ack and land in the share-accounting ring. */
+    int n = sm_emit_suggest_difficulty(buf, sizeof buf, 90000004LL, 32768.0);
+    assert(n > 0);
+    assert(strcmp(buf, "{\"id\":90000004,\"method\":"
+                       "\"mining.suggest_difficulty\",\"params\":[32768]}")==0);
+    stratum_msg_t m; assert(stratum_msg_parse(buf,&m)==0);
+    assert(m.id==90000004LL);
+    n = sm_emit_suggest_difficulty(buf, 8, 90000004LL, 32768.0);
+    assert(n == -1);
+}
+
 static void test_emit_overflow(void){
     char buf[8];
     int n = sm_emit_set_extranonce(buf, sizeof buf, "29cc886a", 8);
@@ -94,6 +110,7 @@ int main(void){
     test_emit_set_extranonce();
     test_emit_set_difficulty();
     test_emit_set_version_mask();
+    test_emit_suggest_difficulty();
     test_emit_overflow();
     printf("stratum_msg: parse notify+submit, emit round-trips passed\n");
     return 0;

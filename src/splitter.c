@@ -66,6 +66,12 @@ static bool g_hashrate_split = false;
 static int  g_target_shares  = 10;
 static int  g_min_slice_s    = 10;
 static int  g_max_slice_s    = 120;
+/* EXPERIMENTAL operator opt-in ("assume_extranonce" / --assume-extranonce),
+ * default OFF. Trusts every split miner to honour mining.set_extranonce even
+ * without mining.extranonce.subscribe, so the mux performs the smooth in-place
+ * swap instead of the M5 reconnect-slice fallback (which costs a disconnect per
+ * slice on ESP-Miner-derived firmware). Read-only after startup. */
+static bool g_assume_extranonce = false;
 /* Ratio-weighted (Bresenham) rotation for the start pool a fresh split
  * connection lands on. Guards a static accumulator so ratio_a% of (re)connects
  * begin on A — this is what gives reconnect-slice (naive) miners their A/B
@@ -215,14 +221,17 @@ static void setup_timeslice(int ratio, int interval_ms)
             interval_ms, ratio);
 }
 
-static void setup_hashrate_split(int ratio, int target, int min_s, int max_s)
+static void setup_hashrate_split(int ratio, int target, int min_s, int max_s,
+                                 bool assume_ext)
 {
     g_hashrate_split = true;
     g_target_shares  = target;
     g_min_slice_s    = min_s;
     g_max_slice_s    = max_s;
+    g_assume_extranonce = assume_ext;
     fprintf(stderr, "dualpool: HASHRATE-SPLIT ratio A=%d%% target=%d shares/slice "
-            "(single-miner dual-pool)\n", ratio, target);
+            "assume_extranonce=%s (single-miner dual-pool)\n",
+            ratio, target, assume_ext ? "on" : "off");
 }
 
 /* Ratio-weighted start-pool rotation (Bresenham error diffusion). Over many
@@ -363,12 +372,56 @@ typedef struct {
     char      up_addr[2][128];  /* "host:port" per pool, for secondary reconnect */
 } splitmux_conn_t;
 
+/* Share-accounting hook for split connections. The byte-relay path is accounted
+ * by sniff(); a split connection is parsed by the mux instead, which calls this
+ * once per routed submit its owning pool acks. Attribute the share to THAT pool
+ * (a split miner feeds both over its lifetime, so the per-pool totals must follow
+ * the ack, not the connection's start pool) and mirror it onto the miner's row so
+ * the dashboard shows real numbers instead of 0/(unauth).
+ *
+ * Runs on the mux thread. Takes g_totals_lock and g_conns_lock separately, never
+ * nested, matching sniff()'s discipline. */
+static void splitmux_share_report(void *ctx, int pool, bool accepted,
+                                  double diff, const char *worker)
+{
+    splitmux_conn_t *c = ctx;
+    pool_id_t p = (pool == 1) ? POOL_B : POOL_A;
+
+    pthread_mutex_lock(&g_totals_lock);
+    if (accepted) {
+        g_totals.accepted_diff[p] += diff;
+        g_totals.accepted_n[p]++;
+    } else {
+        g_totals.rejected_diff[p] += diff;
+        g_totals.rejected_n[p]++;
+    }
+    pthread_mutex_unlock(&g_totals_lock);
+
+    if (c->slot < 0)
+        return;
+    pthread_mutex_lock(&g_conns_lock);
+    if (g_conns[c->slot].used) {
+        if (accepted) {
+            g_conns[c->slot].accepted++;
+            g_conns[c->slot].accepted_diff += diff;
+        } else {
+            g_conns[c->slot].rejected++;
+        }
+        /* First time we learn the worker name, show it (was "(unauth)"). */
+        if (!g_conns[c->slot].worker[0] && worker && worker[0])
+            snprintf(g_conns[c->slot].worker, sizeof(g_conns[c->slot].worker),
+                     "%s", worker);
+    }
+    pthread_mutex_unlock(&g_conns_lock);
+}
+
 static void *splitmux_conn_thread(void *arg)
 {
     splitmux_conn_t *c = arg;
     const char *ua[2] = { c->up_addr[0], c->up_addr[1] };
     splitmux_run(c->down_fd, c->up_fd, c->ratio_a, g_target_shares,
-                 g_min_slice_s, g_max_slice_s, c->start_pool, ua);
+                 g_min_slice_s, g_max_slice_s, c->start_pool, ua,
+                 splitmux_share_report, c, g_assume_extranonce);
     /* Free the slot BEFORE closing fds — same fd-reuse eviction-race ordering
      * conn_thread documents (evict_all/evict_pool must never shutdown() a fd
      * number the kernel has already handed to a newer accept()). */
@@ -899,20 +952,28 @@ static int run_accept_loop(int listen_port)
             int upB = readyB ? tcp_connect(g_pool_host[POOL_B], g_pool_port[POOL_B]) : -1;
             if (upA < 0 && upB < 0) { close(down); continue; }   /* ready pool(s) failed to connect */
 
+            /* Keep pool INDICES intact (up_fd[0]=A, up_fd[1]=B) and leave a
+             * not-ready pool as -1 rather than collapsing to a single-pool
+             * passthrough. The mux's async secondary bring-up connects a -1 pool
+             * later (it has up_addr) and retries with backoff, so a miner that
+             * arrives while one ckproxy is still warming — which is EVERY miner
+             * for the first seconds after a restart, since miners reconnect in
+             * ~1-5s but a ckproxy needs longer — still ends up split once that
+             * pool is ready, instead of being pinned single-pool for the whole
+             * session. Start on a pool that is actually connected. */
             int up_fd[2];
             int start_pool;
             pool_id_t reg_pool;   /* pool the conn is registered/counted under */
-            if (upA >= 0 && upB >= 0) {              /* real split */
-                up_fd[0] = upA; up_fd[1] = upB;
+            up_fd[0] = upA;
+            up_fd[1] = upB;
+            if (upA >= 0 && upB >= 0) {              /* both ready: ratio rotation */
                 start_pool = (int)sp;
                 reg_pool = sp;
-            } else if (upA >= 0) {                   /* single-pool passthrough A */
-                up_fd[0] = upA; up_fd[1] = -1;
-                start_pool = -1;
+            } else if (upA >= 0) {                   /* A now, B joins when ready */
+                start_pool = 0;
                 reg_pool = POOL_A;
-            } else {                                 /* single-pool passthrough B */
-                up_fd[0] = upB; up_fd[1] = -1;
-                start_pool = -1;
+            } else {                                 /* B now, A joins when ready */
+                start_pool = 1;
                 reg_pool = POOL_B;
             }
 
@@ -1136,7 +1197,8 @@ static int run_config_mode(const char *path)
         setup_timeslice(cfg.ratio_a, cfg.interval_ms);
     else if (!strcmp(cfg.mode, "hashrate_split"))
         setup_hashrate_split(cfg.ratio_a, cfg.target_shares,
-                             cfg.min_slice_s, cfg.max_slice_s);
+                             cfg.min_slice_s, cfg.max_slice_s,
+                             cfg.assume_extranonce);
     webui_boot(cfg.web_port);
 
     pthread_t mon;
@@ -1158,7 +1220,8 @@ static int run_config_mode(const char *path)
 
 static int run_cli_mode(int listen_port, int ratio, char *a_arg, char *b_arg,
                         int web_port, const char *mode, int interval_ms,
-                        int target_shares, int min_slice_s, int max_slice_s)
+                        int target_shares, int min_slice_s, int max_slice_s,
+                        bool assume_ext)
 {
     if (split_hostport(a_arg, &g_pool_host[POOL_A], &g_pool_port[POOL_A]) ||
         split_hostport(b_arg, &g_pool_host[POOL_B], &g_pool_port[POOL_B])) {
@@ -1175,6 +1238,7 @@ static int run_cli_mode(int listen_port, int ratio, char *a_arg, char *b_arg,
     g_cfg.target_shares = target_shares;
     g_cfg.min_slice_s   = min_slice_s;
     g_cfg.max_slice_s   = max_slice_s;
+    g_cfg.assume_extranonce = assume_ext;
     snprintf(g_cfg.pools[0].primary.url, sizeof(g_cfg.pools[0].primary.url), "%s:%s",
              g_pool_host[POOL_A], g_pool_port[POOL_A]);
     snprintf(g_cfg.pools[1].primary.url, sizeof(g_cfg.pools[1].primary.url), "%s:%s",
@@ -1184,7 +1248,8 @@ static int run_cli_mode(int listen_port, int ratio, char *a_arg, char *b_arg,
     if (!strcmp(mode, "time_slice"))
         setup_timeslice(ratio, interval_ms);
     else if (!strcmp(mode, "hashrate_split"))
-        setup_hashrate_split(ratio, target_shares, min_slice_s, max_slice_s);
+        setup_hashrate_split(ratio, target_shares, min_slice_s, max_slice_s,
+                             assume_ext);
     webui_boot(web_port);
     return run_accept_loop(listen_port);
 }
@@ -1196,6 +1261,7 @@ int main(int argc, char **argv)
     signal(SIGHUP, sighup_handler);   /* reload config on SIGHUP */
     int listen_port = 3333, ratio = 50, web_port = 0, interval_ms = 180000;
     int target_shares = 10, min_slice_s = 10, max_slice_s = 120;
+    bool assume_ext = false;      /* EXPERIMENTAL opt-in, default OFF */
     char *a_arg = NULL, *b_arg = NULL, *config_path = NULL, *mode = "farm_split";
 
     for (int i = 1; i < argc; i++) {
@@ -1212,6 +1278,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--target-shares") && i + 1 < argc) target_shares = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--min-slice") && i + 1 < argc) min_slice_s = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-slice") && i + 1 < argc) max_slice_s = atoi(argv[++i]);
+        /* EXPERIMENTAL: trust miners to honour mining.set_extranonce without
+         * advertising mining.extranonce.subscribe (smooth swaps instead of the
+         * reconnect-slice fallback). Mirrors the "assume_extranonce" config key. */
+        else if (!strcmp(argv[i], "--assume-extranonce")) assume_ext = true;
     }
 
     /* D4: clamp the hashrate_split slice knobs from the CLI (atoi) path too, so a
@@ -1228,10 +1298,12 @@ int main(int argc, char **argv)
             "  %s --config /config/config.json           (production: spawns 2 ckproxy)\n"
             "  %s --listen P --poolA h:p --poolB h:p --ratio N [--web P] [--webroot DIR]\n"
             "     [--mode farm_split|time_slice|hashrate_split] [--interval MS]\n"
-            "     [--target-shares N] [--min-slice N] [--max-slice N]\n",
+            "     [--target-shares N] [--min-slice N] [--max-slice N]\n"
+            "     [--assume-extranonce]   (experimental: assume miners honour\n"
+            "                              mining.set_extranonce unadvertised)\n",
             argv[0], argv[0]);
         return 2;
     }
     return run_cli_mode(listen_port, ratio, a_arg, b_arg, web_port, mode, interval_ms,
-                        target_shares, min_slice_s, max_slice_s);
+                        target_shares, min_slice_s, max_slice_s, assume_ext);
 }

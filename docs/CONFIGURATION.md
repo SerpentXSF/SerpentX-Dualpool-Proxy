@@ -104,13 +104,26 @@ stock firmware offers.
 
 ## `hashrate_split` mode
 
-> ⚠️ **Experimental — not production-ready.** This mode passes the full test suite
-> but a live trial against real pools (with ckproxy in `userproxy` mode) found it
-> does not yet reliably deliver shares to the second pool: the mux's upstream
-> handshake can outrun a ckproxy that isn't ready to serve a subscription, and the
-> miner then stays on a single pool. **Don't rely on it for real mining yet** —
-> use `farm_split` (2+ miners) or `time_slice` (one miner). It is being actively
-> fixed; this note will be removed once it's validated live.
+> ⚠️ **Experimental.** `farm_split` and `time_slice` remain the supported modes;
+> use this one knowing what has and hasn't been proven.
+>
+> **Validated:** a single ~1.5 TH/s miner (BitAxe-class, BM1370) against
+> solo.ckpool + Kryptex for 20+ hours — 0.08% rejects, work split within 0.4
+> points of the configured `ratio_a`, credited hashrate ≈ the miner's real rate,
+> and multi-hour sessions with no reconnects.
+>
+> **Not proven / known limits:**
+> - A **large miner against a pool that opens at a very high difficulty** (Kryptex
+>   opens sessions at 1,000,000) can struggle to bootstrap: it finds its first
+>   share too slowly for the pool's vardiff to come down, and some firmware
+>   watchdogs reconnect first. The proxy now suggests a difficulty on the miner's
+>   behalf once it can measure the rate, which rescues most sessions, but this is
+>   reactive — it needs one share first.
+> - Every fresh session pays a small **difficulty-settling burst** of rejects while
+>   both pools size the miner. It amortises to ~0 over hours, but is visible on
+>   short runs and on frequent restarts.
+> - Only miners that honour `mining.set_extranonce` get the smooth in-place swap;
+>   others fall back to a brief reconnect per slice (see `assume_extranonce`).
 
 `hashrate_split` puts a **single miner on both pools at the same time**, the way
 some dual-pool BitAxe/NerdQAxe firmware works — but without reflashing anything.

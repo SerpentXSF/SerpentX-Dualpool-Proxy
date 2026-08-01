@@ -6,8 +6,21 @@ one line per event to stdout (and optionally a file) so runners can count them:
     <TAG> conn               (a connection reached this pool)
     <TAG> notify job=<jobid> (this pool ISSUED that job to the mux)
     <TAG> share job=<jobid>  (a share was submitted to this pool, with its job)
+    <TAG> setdiff diff=<d>   (this pool told its client to mine at difficulty d)
+    <TAG> suggest diff=<d>   (a mining.suggest_difficulty reached this pool)
     <TAG> reject-version job=<jobid> (a share's rolled version left the granted
                              ASICBoost version-rolling mask; see --vmask)
+
+Opening difficulty (--opendiff <N>, default 1024): the difficulty every new
+session is opened at. Real pools differ wildly here — Kryptex opens a session at
+1,000,000, which starves any miner too small to find a share at that difficulty
+before its watchdog fires. --opendiff 1000000 models that pool.
+
+mining.suggest_difficulty is HONOURED: the pool adopts max(suggested, --mindiff)
+and pushes it with mining.set_difficulty (this is what lets a big miner — or the
+mux on its behalf — escape a too-high opening difficulty). Note this pool has NO
+vardiff of its own: the opening difficulty is where it stays unless somebody
+suggests otherwise, which is the point — it isolates the suggestion path.
 
 ASICBoost version rolling (--vmask <hex>, e.g. 1fffe000, default OFF): when set,
 this pool GRANTS version-rolling on mining.configure — replying
@@ -63,7 +76,7 @@ def enonce1_for(tag):
 BASE_VERSION = 0x20000000   # nVersion the notify carries (params[5]); miners roll it
 
 def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
-           vmask=None):
+           vmask=None, reject_dupes=False, opendiff=1024.0, mindiff=1024.0):
     logline(logpath, f"{tag} conn")
     if ready_delay > 0 and (time.monotonic() - START) < ready_delay:
         # "not ready yet": for the first ready_delay seconds of PROCESS life,
@@ -112,7 +125,9 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
     en1 = enonce1_for(tag)
     slock = threading.Lock()
     seq = [0]
+    seen_shares = set()   # (job,nonce2,ntime,nonce,version) tuples, for --reject-dupes
     granted = [None]   # per-connection granted version-rolling mask (int), None = not granted
+    curdiff = [opendiff]  # this session's difficulty (moves only on suggest_difficulty)
     stop = threading.Event()
     try:
         f = conn.makefile("rwb")
@@ -130,6 +145,13 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
             return {"id": None, "method": "mining.notify",
                     "params": [jid, "0" * 64, "01", "02", [],
                                "20000000", "1a2b3c4d", "5e6f7788", clean]}
+        def set_diff(d):
+            # Push a difficulty to the client and remember it. Logged so a runner
+            # can assert a pool actually came DOWN off its opening difficulty.
+            curdiff[0] = d
+            dv = int(d) if float(d).is_integer() else d
+            logline(logpath, f"{tag} setdiff diff={dv}")
+            send({"id": None, "method": "mining.set_difficulty", "params": [dv]})
         def notifier():
             # After authorize, keep feeding fresh clean jobs so the mux has
             # clean-job boundaries to swap on. Opt-in (interval > 0): a periodic
@@ -185,8 +207,7 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
                           "error": [24, "Empty workername parameter", None]})
                     continue
                 send({"id": mid, "result": True, "error": None})
-                send({"id": None, "method": "mining.set_difficulty",
-                      "params": [1024]})
+                set_diff(opendiff)          # this pool's OPENING difficulty
                 # A real version-rolling pool PUSHES the negotiated mask to its
                 # client via mining.set_version_mask. A ckpool proxy sitting in
                 # front of us relies on this to learn the upstream version_mask
@@ -202,6 +223,24 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
                 send(make_notify(True))              # first clean job
                 if interval > 0:                     # opt-in periodic fresh jobs
                     threading.Thread(target=notifier, daemon=True).start()
+            elif m == "mining.suggest_difficulty":
+                # A client (or the mux on a miner's behalf) tells us how hard this
+                # miner should be. Adopt it, floored at this pool's --mindiff, and
+                # push the new difficulty. Ack the request so a sentinel-id caller
+                # sees its reply (the mux must drop that ack, not relay it).
+                params = msg.get("params") or []
+                try:
+                    want = float(params[0]) if params else 0.0
+                except (TypeError, ValueError):
+                    want = 0.0
+                logline(logpath, f"{tag} suggest diff="
+                                 f"{int(want) if float(want).is_integer() else want}")
+                if mid is not None:
+                    send({"id": mid, "result": True, "error": None})
+                if want > 0:
+                    d = want if want >= mindiff else mindiff
+                    if d != curdiff[0]:
+                        set_diff(d)
             elif m == "mining.submit":
                 params = msg.get("params") or []
                 job = params[1] if len(params) > 1 else "?"
@@ -226,6 +265,23 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
                         send({"id": mid, "result": False,
                               "error": [23, "Invalid version", None]})
                         continue
+                # Duplicate-share rejection (models a real solo pool's SE_DUPE):
+                # the same (job,nonce2,ntime,nonce,version) tuple submitted twice is
+                # rejected with "Duplicate share". This is what a low-churn pool does
+                # to the identical shares an ASIC re-emits after the mux force-clean
+                # re-presents a job it already mined (the FIX-11 swap defect).
+                if reject_dupes:
+                    n2 = params[2] if len(params) > 2 else ""
+                    ntime = params[3] if len(params) > 3 else ""
+                    nonce = params[4] if len(params) > 4 else ""
+                    ver = params[5] if len(params) > 5 else ""
+                    tup = (job, n2, ntime, nonce, ver)
+                    if tup in seen_shares:
+                        logline(logpath, f"{tag} reject-duplicate job={job}")
+                        send({"id": mid, "result": False,
+                              "error": [22, "Duplicate share", None]})
+                        continue
+                    seen_shares.add(tup)
                 logline(logpath, f"{tag} share job={job} en={en}")
                 send({"id": mid, "result": True, "error": None})
             elif mid is not None:
@@ -257,6 +313,17 @@ def main():
                     help="hex ASICBoost version-rolling mask to GRANT on "
                          "mining.configure and enforce on submits (e.g. 1fffe000); "
                          "default OFF (configure answered {}, submits unchecked)")
+    ap.add_argument("--opendiff", type=float, default=1024.0,
+                    help="difficulty every new session is OPENED at (default "
+                         "1024; use 1000000 to model a pool like Kryptex that "
+                         "opens far above a small miner's reach)")
+    ap.add_argument("--mindiff", type=float, default=1024.0,
+                    help="this pool's difficulty floor: a mining.suggest_difficulty "
+                         "below it is clamped up to it (default 1024)")
+    ap.add_argument("--reject-dupes", action="store_true", dest="reject_dupes",
+                    help="reject a repeated (job,nonce2,ntime,nonce,version) share "
+                         "with 'Duplicate share' (models a solo pool's SE_DUPE) — "
+                         "catches the swap-back re-presentation defect (FIX-11)")
     a = ap.parse_args()
     interval = a.notify_ms / 1000.0 if a.notify_ms > 0 else a.interval
     vmask = int(a.vmask, 16) if a.vmask else None
@@ -282,7 +349,8 @@ def main():
             break               # listener closed via SIGUSR1
         threading.Thread(target=handle,
                          args=(conn, a.tag, a.log, interval, a.jobns, a.workless,
-                               a.ready_delay, vmask),
+                               a.ready_delay, vmask, a.reject_dupes,
+                               a.opendiff, a.mindiff),
                          daemon=True).start()
 
     # keep the process (and its live handler threads) alive after we stop listening

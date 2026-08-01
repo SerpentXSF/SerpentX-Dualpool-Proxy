@@ -34,6 +34,16 @@ typedef struct {
     int  target_shares;   /* hashrate_split: shares per slice (default 10) */
     int  min_slice_s;     /* hashrate_split: min slice seconds (default 10) */
     int  max_slice_s;     /* hashrate_split: max slice seconds (default 120) */
+    /* EXPERIMENTAL, default false. hashrate_split only: trust every miner to
+     * honour mining.set_extranonce even when it never sends
+     * mining.extranonce.subscribe, so the mux uses the SMOOTH in-place swap
+     * instead of the M5 reconnect-slice fallback. ESP-Miner-derived firmware
+     * (BitAxe / Hammer / NerdAxe / NerdQAxe) commonly implements set_extranonce
+     * without advertising it; without this opt-in such a fleet is reconnect-
+     * sliced (a disconnect per slice), which wastes hashrate. Leave false unless
+     * you know your firmware follows set_extranonce — a miner that ignores it
+     * would keep mining the previous pool's extranonce1 and get rejects. */
+    bool assume_extranonce;
     char web_password[128];
     pool_cfg_t pools[2];
 } dualpool_config_t;

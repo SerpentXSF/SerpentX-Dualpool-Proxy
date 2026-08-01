@@ -10,6 +10,7 @@
 #include "splitmux.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <netdb.h>
 #include <poll.h>
 #include <signal.h>
@@ -99,6 +100,10 @@ int main(int argc, char **argv)
     int start_pool = -1;      /* default: seed from ratio (M3/M4 unchanged) */
     int recon_loop = 0;       /* >0: M5 reconnect loop, this many iterations max */
     int alt_start = 0;        /* alternate start_pool 0,1,0,1,... per reconnect */
+    /* EXPERIMENTAL opt-in, default OFF (matches the splitter default): assume the
+     * miner honours mining.set_extranonce without advertising it, so the mux uses
+     * the smooth swap rather than the M5 reconnect-slice fallback. */
+    bool assume_ext = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--listen") && i + 1 < argc) port = atoi(argv[++i]);
@@ -111,13 +116,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--start-pool") && i + 1 < argc) start_pool = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--reconnect-loop") && i + 1 < argc) recon_loop = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--alt-start")) alt_start = 1;
+        else if (!strcmp(argv[i], "--assume-extranonce")) assume_ext = true;
     }
     if (port <= 0 || !upstream) {
         fprintf(stderr,
                 "usage: %s --listen <port> --upstream <host:port>"
                 " [--upstream2 <host:port>] [--ratio N] [--target N]"
                 " [--min N] [--max N] [--start-pool 0|1]"
-                " [--reconnect-loop N] [--alt-start]\n", argv[0]);
+                " [--reconnect-loop N] [--alt-start]"
+                " [--assume-extranonce]\n", argv[0]);
         return 2;
     }
 
@@ -148,7 +155,10 @@ int main(int argc, char **argv)
             int sp = alt_start ? (it & 1) : start_pool;
             int up_fd[2] = { up, up2 };
             const char *up_addr[2] = { upstream, upstream2 };
-            splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s, sp, up_addr);
+            /* No share-accounting callback: the probe has no dashboard to feed and
+             * the fake pools' own share logs are this test's oracle. */
+            splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s, sp, up_addr,
+                         NULL, NULL, assume_ext);
 
             /* splitmux_run may have reconnected the secondary — close the FINAL
              * fds it wrote back, not the originals. */
@@ -178,7 +188,8 @@ int main(int argc, char **argv)
 
     int up_fd[2] = { up, up2 };
     const char *up_addr[2] = { upstream, upstream2 };
-    splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s, start_pool, up_addr);
+    splitmux_run(down_fd, up_fd, ratio, target, min_s, max_s, start_pool, up_addr,
+                 NULL, NULL, assume_ext);
 
     /* Close the FINAL fds splitmux_run wrote back (the secondary may have been
      * reconnected during retries), not the originals. */

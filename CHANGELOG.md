@@ -17,30 +17,35 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ## Unreleased
 
-- **New mode — `hashrate_split` (EXPERIMENTAL — not yet validated against live
-  pools):** a single miner can *in principle* mine **both pools at
+- **New mode — `hashrate_split` (EXPERIMENTAL):** one miner mines **both pools at
   once**, the way some dual-pool BitAxe/NerdQAxe firmware works, but without
-  reflashing — the proxy multiplexes one downstream connection across both
+  reflashing — the proxy multiplexes a single downstream connection across both
   upstreams and time-slices it by share count (`target_shares`, clamped between
-  `min_slice_s`/`max_slice_s`). Miners that honor `mining.set_extranonce` get a
-  smooth in-place pool swap; others automatically fall back to a brief
-  reconnect per slice. Selectable from the **dashboard** (new mode option +
-  knob fields) or `config.json`, with full config-API round-trip
-  (`POST /api/config` accepts and persists `target_shares`/`min_slice_s`/
-  `max_slice_s`, `GET /api/status` reports them back). Like other mode/knob
-  changes, it's restart-applied.
-  **Status:** the mode is fully implemented and passes the test suite, but a live
-  trial against real pools (ckproxy in `userproxy` mode) found it does not yet
-  reliably deliver shares to the second pool — the mux's upstream handshake can
-  outrun a ckproxy that isn't ready to serve a subscription, and the miner then
-  stays on one pool. **Do not use in production yet.** Being actively fixed.
-  Other known limitations: split-connection shares are
-  credited at the pools but not yet counted in this proxy's own dashboard
-  tally (verify on the pool's own dashboard); and the 90s no-work
-  auto-donation is reduced for pools serving only split connections, mitigated
-  by the mux's own single-pool degrade. See
-  [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#hashrate_split-mode) for
-  details.
+  `min_slice_s`/`max_slice_s`). Miners that honour `mining.set_extranonce` get a
+  smooth in-place pool swap; others fall back to a brief reconnect per slice, and
+  `assume_extranonce` opts miners that honour it without advertising it into the
+  smooth path. Selectable from the **dashboard** or `config.json`, with a full
+  config-API round-trip; like other mode/knob changes, it is restart-applied.
+
+  Each pool keeps its own difficulty (a share is credited at the difficulty its
+  pool assigned, so presenting one merged difficulty would silently discard work),
+  ASICBoost version-rolling is negotiated per pool and reconciled to the
+  intersection, submits are routed to the pool whose job they were found on with a
+  stale-grace window, pool acknowledgements are relayed back, and split
+  connections now report their shares to the dashboard and `/metrics`. The proxy
+  also relays a miner's `mining.suggest_difficulty` to both pools and, if the
+  miner sends none, suggests one itself from the measured hashrate so a pool that
+  opens at a very high difficulty cannot starve the miner.
+
+  **Validated:** a single ~1.5 TH/s miner against solo.ckpool + Kryptex for 20+
+  hours — 0.08% rejects, work split within 0.4 points of `ratio_a`, credited
+  hashrate ≈ the miner's real rate, multi-hour sessions with no reconnects.
+  **Known limits:** a large miner against a pool opening at a very high difficulty
+  may need a warm-up before it bootstraps; every fresh session pays a small
+  difficulty-settling burst; and the 90s no-work auto-donation is reduced for
+  pools serving only split connections (mitigated by the mux's single-pool
+  degrade). `farm_split` and `time_slice` remain the supported modes — see
+  [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#hashrate_split-mode).
 
 ## X.3.5 — Hardening, robustness & dashboard fixes
 
