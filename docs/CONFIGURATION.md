@@ -38,6 +38,7 @@ This page documents every option and how to tune it.
 | `target_shares` | `hashrate_split`: shares per slice before swapping pools, 1–1000 | `10` |
 | `min_slice_s` | `hashrate_split`: minimum slice length (s), 1–3600 | `10` |
 | `max_slice_s` | `hashrate_split`: maximum slice length (s), 1–3600 | `120` |
+| `assume_extranonce` | `hashrate_split`: trust miners to honour `mining.set_extranonce` without advertising it (see below) | `false` |
 | `web_password` | If set, dashboard/API/metrics require this key | `""` (off) |
 | `pools[]` | Exactly **two** pool entries | — |
 | `pools[].url` | Pool `host:port` | required |
@@ -108,9 +109,10 @@ stock firmware offers.
 > use this one knowing what has and hasn't been proven.
 >
 > **Validated:** a single ~1.5 TH/s miner (BitAxe-class, BM1370) against
-> solo.ckpool + Kryptex for 20+ hours — 0.08% rejects, work split within 0.4
-> points of the configured `ratio_a`, credited hashrate ≈ the miner's real rate,
-> and multi-hour sessions with no reconnects.
+> solo.ckpool + Kryptex — 12 hours unattended, **4,672 shares accepted, 1
+> rejected (0.02%)**, work split 69.8/30.2 against a 70/30 target, credited
+> hashrate matching the miner's real rate, and no reconnect churn. This was with
+> each pool's difficulty pinned (see below) — **that part is required.**
 >
 > **Not proven / known limits:**
 > - A **large miner against a pool that opens at a very high difficulty** (Kryptex
@@ -131,6 +133,46 @@ The miner connects once, to the proxy; internally, the proxy multiplexes it
 across upstream connections to Pool A and Pool B, swapping which pool it's
 mining for at slice boundaries so its shares land on both according to `ratio_a`.
 
+### Required: pin each pool's difficulty
+
+**Set `startdiff` and `mindiff` on BOTH pools before using this mode.** It is not
+a tuning option — without it the mode looks broken.
+
+A pool sizes a miner with vardiff by watching how fast shares arrive. Time-slicing
+breaks that assumption: from Pool A's point of view your miner hashes at full rate
+during A's slices and **stops completely** during B's, and vice versa. Each pool
+chases that on/off pattern, and every difficulty change strands the shares already
+in flight, which come back as `Above target` rejects. Pinning a floor stops the
+chase.
+
+Measured on the same miner, same pools, back to back:
+
+| | Difficulty behaviour | Reject rate |
+|---|---|---|
+| No `mindiff` | oscillating (`1205 → 226 → 653` …) | **2.2%**, climbing |
+| `mindiff` pinned | fixed, unchanged over 64 pool swaps | **0.02%** |
+
+Size it for roughly one share every 10–15 seconds — the same values as the
+[`startdiff` table below](#suggested-startdiff-by-miner-hashrate), applied to
+**both** pools, with `mindiff` equal to `startdiff` so nothing can drift under it:
+
+```json
+"pools": [
+  { "url": "solo.ckpool.org:3333", "user": "bc1qYourAddress.worker", "pass": "x",
+    "startdiff": 4096, "mindiff": 4096 },
+  { "url": "otherpool:3333", "user": "otherwallet.worker", "pass": "x",
+    "startdiff": 4096, "mindiff": 4096 }
+]
+```
+
+If the two pools enforce different floors, give each its own value — they don't
+have to match, they just each have to stop moving. A pool's own floor always wins,
+so pick at least that.
+
+This also protects a **large** miner from a pool that opens a session at a very
+high difficulty: without a floor it may find its first share too slowly for the
+pool's vardiff to recover, and some firmware watchdogs reconnect before it does.
+
 **Knobs:**
 
 - `target_shares` — roughly how many shares to collect before considering a
@@ -138,6 +180,8 @@ mining for at slice boundaries so its shares land on both according to `ratio_a`
   hashrate, instead of a fixed wall-clock timer).
 - `min_slice_s` / `max_slice_s` — hard floor/ceiling (seconds) on slice length,
   so a slow miner isn't swapped too often and a fast one isn't stuck too long.
+  Longer slices mean fewer swaps and less work discarded at each one; the
+  validated configuration used 300 s / 900 s.
 
 **How the pool swap happens:** on a miner that honors `mining.set_extranonce`,
 the proxy swaps the miner onto the new pool's job stream in place — smooth, no
@@ -146,18 +190,47 @@ reconnect. For a miner that doesn't support `set_extranonce`, the proxy
 across both pools, just with a brief reconnect at each swap instead of an
 in-place handoff.
 
+**`assume_extranonce` (advanced, default `false`):** the proxy decides which of
+those two paths to use by watching for `mining.extranonce.subscribe` — a miner
+that never sends it is assumed not to honour `mining.set_extranonce`, and gets
+reconnect-slicing. Several ESP-Miner-derived firmwares (BitAxe, Hammer, NerdAxe,
+NerdQAxe) *do* honour `set_extranonce` but never advertise it, so they land on the
+reconnect path unnecessarily — costing a disconnect per slice and the ramp-up
+after it.
+
+```json
+{ "mode": "hashrate_split", "assume_extranonce": true }
+```
+
+Setting it tells the proxy to use the smooth in-place swap for **every** split
+miner, advertised or not. Turn it on only if your miners really do follow
+`set_extranonce`: one that ignores it will keep mining the old pool's extranonce
+after a swap and its shares will be **rejected** until it reconnects. The failure
+is obvious and immediate — rejects climb right after the first swap — and turning
+the key back off restores the previous behaviour with no other change.
+
 Like mode/interval, `hashrate_split`'s knobs are **restart-applied** — changing
 them via the dashboard or `config.json` takes effect on the next restart (only
 `ratio_a` hot-applies without one).
 
 ### Known limitations (first release)
 
-- **Dashboard accounting gap:** a `hashrate_split` miner's shares are submitted
-  to, and credited by, the pools themselves — but this proxy's own
-  dashboard/API share tally does **not yet** count shares from a split
-  connection (its per-miner/per-pool rows read `0`). Verify your shares are
-  landing by checking **the pool's own dashboard**, not this one, until this is
-  fixed.
+- **Difficulty settling on a fresh session:** when a session starts, each pool
+  sizes the miner from scratch, and shares already in flight while a pool moves
+  its difficulty are rejected as *"Above target"*. It is a burst at connect, not
+  an ongoing rate — it amortises to roughly nothing over a long session, but it
+  is visible on short runs and adds up if the proxy restarts often.
+- **Bootstrapping a large miner on a high-difficulty pool:** a pool that opens a
+  session at a very high difficulty (Kryptex opens at 1,000,000) can starve a big
+  miner — it finds its first share too slowly for the pool's vardiff to come down,
+  and some firmware watchdogs give up and reconnect first. The proxy suggests a
+  difficulty on the miner's behalf once it can measure the rate, which clears the
+  problem for most sessions, but it is reactive: it needs one share first. A small
+  miner (~1–2 TH/s) is unaffected.
+- **Split accounting is per connection:** a split miner's row shows its combined
+  accepted/rejected across both pools, while the `pool` column shows the pool it
+  started on. Per-pool totals and `/metrics` attribute each share to the pool that
+  actually acknowledged it.
 - **Reduced 90s no-work auto-donation:** normally, if a pool sends no work for
   90 seconds while it has miners, Dual-Pool Proxy evicts those miners onto the
   healthy pool (see [Failover](#failover-per-pool)). For a pool that's only

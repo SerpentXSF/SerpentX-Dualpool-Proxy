@@ -1877,11 +1877,30 @@ static int handle_pool_readable(mux_t *m, int p)
         return 0;
     }
     if (lb_fill(m->pool[p].fd, &m->bup[p]) < 0) {
-        if (p == m->sec && m->active != m->sec) {
-            sec_fail(m, now_us());       /* non-active secondary died: retry it */
+        /* Whether a dead pool is recoverable depends on whether the miner is
+         * currently mining it — NOT on which pool happened to be handshaked first.
+         * The active pool alternates every slice, so the original primary is the
+         * idle one about half the time; keying this on the static role tore down
+         * sessions the mux could have carried on, dropping the miner for roughly
+         * half of all mid-session outages. Any pool that is not active can simply
+         * be retried in the background while the miner keeps hashing on the other.
+         *
+         * Re-designate the dead pool as the secondary so the async bring-up owns
+         * it, and clear the version-mask reconciliation so its mask is negotiated
+         * again when it returns (it may come back with a different grant). */
+        if (p != m->active) {
+            if (m->sec != p) {
+                m->sec = p;
+                m->sec_backoff_s = SEC_BACKOFF_MIN;
+                m->sec_degrade_logged = false;
+                m->sec_vroll_seen = false;
+                m->sec_vmask = 0;
+                m->sec_vmask_applied = false;
+            }
+            sec_fail(m, now_us());       /* idle pool died: retry it in background */
             return 0;
         }
-        return -1;                       /* primary / active pool died: end */
+        return -1;                       /* the pool the miner is ON died: end */
     }
     if (process_lines(m, &m->bup[p], true, p) < 0)
         return -1;

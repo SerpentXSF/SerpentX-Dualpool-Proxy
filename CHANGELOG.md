@@ -15,7 +15,7 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ---
 
-## Unreleased
+## X.4 — Hashrate split (experimental)
 
 - **New mode — `hashrate_split` (EXPERIMENTAL):** one miner mines **both pools at
   once**, the way some dual-pool BitAxe/NerdQAxe firmware works, but without
@@ -37,15 +37,28 @@ The version is the single source of truth in [`VERSION`](VERSION) /
   miner sends none, suggests one itself from the measured hashrate so a pool that
   opens at a very high difficulty cannot starve the miner.
 
-  **Validated:** a single ~1.5 TH/s miner against solo.ckpool + Kryptex for 20+
-  hours — 0.08% rejects, work split within 0.4 points of `ratio_a`, credited
-  hashrate ≈ the miner's real rate, multi-hour sessions with no reconnects.
-  **Known limits:** a large miner against a pool opening at a very high difficulty
-  may need a warm-up before it bootstraps; every fresh session pays a small
-  difficulty-settling burst; and the 90s no-work auto-donation is reduced for
-  pools serving only split connections (mitigated by the mux's single-pool
-  degrade). `farm_split` and `time_slice` remain the supported modes — see
+  **Set `startdiff` and `mindiff` on both pools when using this mode — it is
+  required, not a tuning option.** Time-slicing makes a miner look intermittent to
+  each pool, so an unpinned vardiff chases the on/off pattern and every difficulty
+  change strands in-flight shares. Measured on the same miner back to back:
+  unpinned 2.2% rejects and climbing, pinned 0.02%.
+
+  **Validated:** a single ~1.5 TH/s miner against solo.ckpool + Kryptex, 12 hours
+  unattended — 4,672 shares accepted, 1 rejected (0.02%), work split 69.8/30.2
+  against a 70/30 target, credited hashrate matching the miner's real rate, no
+  reconnect churn. **Known limits:** a large miner against a pool that opens at a
+  very high difficulty may need a warm-up before it bootstraps; each fresh session
+  pays a small difficulty-settling burst; and the 90s no-work auto-donation is
+  reduced for pools serving only split connections (the mux's own single-pool
+  degrade covers the same failure). `farm_split` and `time_slice` remain the
+  supported modes — see
   [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#hashrate_split-mode).
+
+- **Mid-session pool outage no longer drops a split miner.** Recovery keyed off
+  which pool was handshaked first rather than which one the miner is actually on;
+  since the active pool alternates every slice, roughly half of all outages ended
+  a session the proxy could have carried straight through. The idle pool is now
+  retried in the background while the miner keeps hashing on the other one.
 
 ## X.3.5 — Hardening, robustness & dashboard fixes
 

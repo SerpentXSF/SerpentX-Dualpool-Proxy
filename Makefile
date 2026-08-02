@@ -10,7 +10,13 @@ SPLITTER_SRC = src/splitter.c src/relay.c src/alloc.c src/share_accounting.c \
                src/stratum_msg.c src/split_sched.c src/splitmux.c \
                $(DP)/pool_scheduler.c $(DP)/pool_failover.c $(DP)/dual_clamp.c
 
-dualpool-splitter: $(SPLITTER_SRC)
+# Headers are prerequisites too: the build is a single compile of all sources, so
+# without them a header-only edit (version.h, a struct change) leaves a stale
+# binary behind — which once meant a release build still reporting the previous
+# version string.
+SPLITTER_HDR = $(wildcard src/*.h) $(wildcard $(DP)/include/*.h)
+
+dualpool-splitter: $(SPLITTER_SRC) $(SPLITTER_HDR)
 	$(CC) $(CFLAGS) -o $@ $(SPLITTER_SRC) $(LDFLAGS)
 
 .PHONY: splitter test t2 clean
