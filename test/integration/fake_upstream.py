@@ -10,6 +10,8 @@ one line per event to stdout (and optionally a file) so runners can count them:
     <TAG> suggest diff=<d>   (a mining.suggest_difficulty reached this pool)
     <TAG> reject-version job=<jobid> (a share's rolled version left the granted
                              ASICBoost version-rolling mask; see --vmask)
+    <TAG> reject-abovetarget job=<jobid> (a share for a job this pool issued BELOW
+                             its current difficulty; see --vardiff)
 
 Opening difficulty (--opendiff <N>, default 1024): the difficulty every new
 session is opened at. Real pools differ wildly here — Kryptex opens a session at
@@ -18,9 +20,24 @@ before its watchdog fires. --opendiff 1000000 models that pool.
 
 mining.suggest_difficulty is HONOURED: the pool adopts max(suggested, --mindiff)
 and pushes it with mining.set_difficulty (this is what lets a big miner — or the
-mux on its behalf — escape a too-high opening difficulty). Note this pool has NO
-vardiff of its own: the opening difficulty is where it stays unless somebody
-suggests otherwise, which is the point — it isolates the suggestion path.
+mux on its behalf — escape a too-high opening difficulty). By default this pool
+has NO vardiff of its own: the opening difficulty is where it stays unless
+somebody suggests otherwise, which is the point — it isolates the suggestion path.
+
+VARDIFF (--vardiff, default OFF) turns that into a pool that chases a target
+share rate, which is what real pools (Kryptex) do and what makes an implausible
+mining.suggest_difficulty expensive:
+  * it aims for one share every --vardiff-target seconds, judged over the last
+    --vardiff-window shares. Faster than half that -> DOUBLE the difficulty;
+    slower than twice it -> HALVE it. Bounded by --vardiff-min/--vardiff-max.
+  * every job records the difficulty it was ISSUED at. A submit for a job issued
+    BELOW the pool's current difficulty is REJECTED with "Above target" and
+    logged `reject-abovetarget` — i.e. an upward vardiff step strands whatever
+    the miner already had in flight. This is the exact mechanism behind the live
+    131/387 (34%) reject rate.
+  * a mining.suggest_difficulty still wins outright (the pool believes its
+    client) and resets the vardiff window — so a bogus hint does not merely get
+    ignored, it re-seeds the ramp. That is what the mux must stop relaying.
 
 ASICBoost version rolling (--vmask <hex>, e.g. 1fffe000, default OFF): when set,
 this pool GRANTS version-rolling on mining.configure — replying
@@ -76,7 +93,9 @@ def enonce1_for(tag):
 BASE_VERSION = 0x20000000   # nVersion the notify carries (params[5]); miners roll it
 
 def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
-           vmask=None, reject_dupes=False, opendiff=1024.0, mindiff=1024.0):
+           vmask=None, reject_dupes=False, opendiff=1024.0, mindiff=1024.0,
+           vardiff=False, vd_target=2.0, vd_window=3, vd_min=1024.0,
+           vd_max=1000000.0):
     logline(logpath, f"{tag} conn")
     if ready_delay > 0 and (time.monotonic() - START) < ready_delay:
         # "not ready yet": for the first ready_delay seconds of PROCESS life,
@@ -127,7 +146,9 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
     seq = [0]
     seen_shares = set()   # (job,nonce2,ntime,nonce,version) tuples, for --reject-dupes
     granted = [None]   # per-connection granted version-rolling mask (int), None = not granted
-    curdiff = [opendiff]  # this session's difficulty (moves only on suggest_difficulty)
+    curdiff = [opendiff]  # this session's difficulty (moves on suggest, and on vardiff)
+    job_diff = {}      # job-id -> difficulty this pool ISSUED that job at (--vardiff)
+    vd_marks = []      # timestamps of recent shares, for the vardiff rate estimate
     stop = threading.Event()
     try:
         f = conn.makefile("rwb")
@@ -141,17 +162,36 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
         def make_notify(clean=True):
             n = seq[0]; seq[0] += 1
             jid = job_id(n)
+            # Remember the difficulty this job is ISSUED at: under --vardiff a
+            # share for a job issued below the pool's CURRENT difficulty is
+            # "Above target" (see the submit handler).
+            job_diff[jid] = curdiff[0]
             logline(logpath, f"{tag} notify job={jid}")
             return {"id": None, "method": "mining.notify",
                     "params": [jid, "0" * 64, "01", "02", [],
                                "20000000", "1a2b3c4d", "5e6f7788", clean]}
         def set_diff(d):
             # Push a difficulty to the client and remember it. Logged so a runner
-            # can assert a pool actually came DOWN off its opening difficulty.
+            # can assert a pool actually came DOWN off its opening difficulty (or,
+            # under --vardiff, RAMPED away from a bogus suggested one).
             curdiff[0] = d
+            del vd_marks[:]                 # the rate estimate restarts here
             dv = int(d) if float(d).is_integer() else d
             logline(logpath, f"{tag} setdiff diff={dv}")
             send({"id": None, "method": "mining.set_difficulty", "params": [dv]})
+        def vardiff_step():
+            # Chase --vardiff-target seconds per share over the last
+            # --vardiff-window shares. Real pools damp this far more; the point
+            # here is the DIRECTION and the stranding it causes, not the exact
+            # control law.
+            if not vardiff or len(vd_marks) < vd_window + 1:
+                return
+            span = vd_marks[-1] - vd_marks[-(vd_window + 1)]
+            avg = span / vd_window
+            if avg < vd_target / 2.0 and curdiff[0] < vd_max:
+                set_diff(min(curdiff[0] * 2.0, vd_max))
+            elif avg > vd_target * 2.0 and curdiff[0] > vd_min:
+                set_diff(max(curdiff[0] / 2.0, vd_min))
         def notifier():
             # After authorize, keep feeding fresh clean jobs so the mux has
             # clean-job boundaries to swap on. Opt-in (interval > 0): a periodic
@@ -237,6 +277,10 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
                                  f"{int(want) if float(want).is_integer() else want}")
                 if mid is not None:
                     send({"id": mid, "result": True, "error": None})
+                # The pool BELIEVES its client: the hint wins outright over
+                # whatever vardiff had converged on, and it restarts the vardiff
+                # window (set_diff clears it). A bogus hint therefore does not get
+                # ignored — it re-seeds the ramp, every time it is repeated.
                 if want > 0:
                     d = want if want >= mindiff else mindiff
                     if d != curdiff[0]:
@@ -282,8 +326,21 @@ def handle(conn, tag, logpath, interval, jobns, workless=False, ready_delay=0.0,
                               "error": [22, "Duplicate share", None]})
                         continue
                     seen_shares.add(tup)
+                # Vardiff stranding: this pool credits a share at the difficulty
+                # it ISSUED the job at, so once vardiff has stepped UP, anything
+                # still in flight for an older job is below the current target and
+                # is refused. Every upward step therefore costs the miner whatever
+                # it had already found — the live 34% reject rate in one line.
+                if vardiff and job_diff.get(job, curdiff[0]) < curdiff[0]:
+                    logline(logpath, f"{tag} reject-abovetarget job={job}")
+                    send({"id": mid, "result": False,
+                          "error": [23, "Above target", None]})
+                    continue
                 logline(logpath, f"{tag} share job={job} en={en}")
                 send({"id": mid, "result": True, "error": None})
+                if vardiff:
+                    vd_marks.append(time.monotonic())
+                    vardiff_step()
             elif mid is not None:
                 send({"id": mid, "result": True, "error": None})
     except (ConnectionResetError, BrokenPipeError, OSError):
@@ -320,6 +377,19 @@ def main():
     ap.add_argument("--mindiff", type=float, default=1024.0,
                     help="this pool's difficulty floor: a mining.suggest_difficulty "
                          "below it is clamped up to it (default 1024)")
+    ap.add_argument("--vardiff", action="store_true",
+                    help="chase a target share rate (models Kryptex): raise the "
+                         "difficulty when shares arrive fast, lower it when slow, "
+                         "and REJECT a submit whose job was issued below the "
+                         "current difficulty with 'Above target'")
+    ap.add_argument("--vardiff-target", type=float, default=2.0, dest="vd_target",
+                    help="seconds per share vardiff aims for (default 2)")
+    ap.add_argument("--vardiff-window", type=int, default=3, dest="vd_window",
+                    help="shares averaged for the vardiff rate estimate (default 3)")
+    ap.add_argument("--vardiff-min", type=float, default=1024.0, dest="vd_min",
+                    help="vardiff difficulty floor (default 1024)")
+    ap.add_argument("--vardiff-max", type=float, default=1000000.0, dest="vd_max",
+                    help="vardiff difficulty ceiling (default 1000000)")
     ap.add_argument("--reject-dupes", action="store_true", dest="reject_dupes",
                     help="reject a repeated (job,nonce2,ntime,nonce,version) share "
                          "with 'Duplicate share' (models a solo pool's SE_DUPE) — "
@@ -350,7 +420,8 @@ def main():
         threading.Thread(target=handle,
                          args=(conn, a.tag, a.log, interval, a.jobns, a.workless,
                                a.ready_delay, vmask, a.reject_dupes,
-                               a.opendiff, a.mindiff),
+                               a.opendiff, a.mindiff, a.vardiff, a.vd_target,
+                               a.vd_window, a.vd_min, a.vd_max),
                          daemon=True).start()
 
     # keep the process (and its live handler threads) alive after we stop listening

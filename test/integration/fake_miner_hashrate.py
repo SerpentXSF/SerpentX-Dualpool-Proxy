@@ -13,27 +13,56 @@ progress is accumulated as a fraction of the current difficulty's expected work,
 so a mid-flight mining.set_difficulty takes effect immediately and smoothly
 instead of restarting the clock.
 
-Crucially it does NOT send mining.suggest_difficulty — it is the firmware that
-never tells a pool how big it is, which is the case the mux has to cover. It DOES
-send mining.extranonce.subscribe, so the mux takes the smooth-swap path.
+By default it does NOT send mining.suggest_difficulty — it is the firmware that
+never tells a pool how big it is, which is the case the mux's proactive
+suggestion has to cover. It DOES send mining.extranonce.subscribe, so the mux
+takes the smooth-swap path.
+
+--suggest <D> models the OPPOSITE firmware: one that ships a hardcoded
+mining.suggest_difficulty and repeats it every --suggest-every seconds
+(--suggest-count times, 0 = for the whole run). A hardcoded small-miner default
+of 4000 is correct for a 1.5 TH/s miner and a share-per-1.3s flood for a
+12.8 TH/s one; the repeats matter because each one re-arms whichever pool is idle
+at that moment.
 
 Prints "diff <d>" whenever the difficulty it was told changes, "set_extranonce
-<hex>" on each swap, and on exit a summary line for the runner to assert on:
+<hex>" on each swap, "suggest <d>" on each hint it sends, and on exit a summary
+line for the runner to assert on:
 
     acks=<n> accepted=<n> rejected=<n> submits=<n>
 
     fake_miner_hashrate.py <host> <port> <seconds> [worker] [hashrate_THs]
+                           [--suggest D] [--suggest-every S] [--suggest-count N]
 """
 import json, select, socket, sys, time
 
 TWO32 = 4294967296.0
 
 
+def split_args(args):
+    """Split a tail of argv into positionals and `--flag value` options."""
+    pos, opts, i = [], {}, 0
+    while i < len(args):
+        if args[i].startswith("--"):
+            opts[args[i]] = args[i + 1] if i + 1 < len(args) else ""
+            i += 2
+        else:
+            pos.append(args[i])
+            i += 1
+    return pos, opts
+
+
 def main():
     host, port, secs = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
-    worker = sys.argv[4] if len(sys.argv) > 4 else "wallet.hr1"
-    ths = float(sys.argv[5]) if len(sys.argv) > 5 else 12.9
+    # Positionals 4/5 (worker, hashrate) are unchanged for the existing callers;
+    # the suggest knobs are flags, so adding them cannot disturb them.
+    pos, opts = split_args(sys.argv[4:])
+    worker = pos[0] if len(pos) > 0 else "wallet.hr1"
+    ths = float(pos[1]) if len(pos) > 1 else 12.9
     hashrate = ths * 1e12                       # H/s
+    sugg_diff = float(opts.get("--suggest", 0))
+    sugg_every = float(opts.get("--suggest-every", 2.0))
+    sugg_count = int(opts.get("--suggest-count", 0))  # 0 = repeat for the whole run
 
     try:
         s = socket.create_connection((host, port), timeout=5)
@@ -94,6 +123,24 @@ def main():
     send({"id": 3, "method": "mining.extranonce.subscribe", "params": []})
     send({"id": 2, "method": "mining.authorize", "params": [worker, "x"]})
 
+    # Hardcoded-hint firmware: send the suggestion straight after authorize and
+    # keep repeating it. Its own id range (10+) keeps it clear of the submit ids.
+    sugg_sent = [0]
+    sugg_next = [time.time()]
+
+    def maybe_suggest(now):
+        if sugg_diff <= 0 or now < sugg_next[0]:
+            return
+        if sugg_count and sugg_sent[0] >= sugg_count:
+            return
+        send({"id": 10 + sugg_sent[0], "method": "mining.suggest_difficulty",
+              "params": [sugg_diff]})
+        sugg_sent[0] += 1
+        sugg_next[0] = now + sugg_every
+        print(f"suggest {sugg_diff:.0f}", flush=True)
+
+    maybe_suggest(time.time())
+
     cur_diff, cur_job = 0.0, ""
     sid = 100
     n2 = 0
@@ -152,6 +199,7 @@ def main():
                 except Exception:
                     pass
         now = time.time()
+        maybe_suggest(now)
         dt, last = now - last, now
         if cur_job and cur_diff > 0.0 and dt > 0.0:
             # Hashes searched in dt, as a fraction of this difficulty's expected

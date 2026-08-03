@@ -79,6 +79,24 @@
 #define SUGGEST_MIN_INTERVAL_US 120000000LL /* at most one per pool per 120 s */
 #define SUGGEST_MIN_SAMPLES     4           /* shares needed before suggesting UP */
 
+/* Plausibility band for a mining.suggest_difficulty the MINER sends (see
+ * clamp_miner_hint). These are seconds-per-share implied by the miner's asked
+ * difficulty against the mux's measured rate — NOT to be confused with
+ * SUGGEST_MIN_INTERVAL_US above, which is a per-pool anti-spam rate limit.
+ *
+ * The live failure: a 12.8 TH/s miner ships a hardcoded small-miner firmware
+ * default of 4000 and repeats it fourteen times. At that rate 4000 is one share
+ * every 1.3 s — a flood. The pool believes the hint, its vardiff ramps
+ * 8192 -> ... -> 1,000,000 chasing the flood back down, and every upward step
+ * strands the in-flight low-difficulty shares as "Above target" (131/387 = 34%
+ * rejected on that pool). The same 4000 is CORRECT for a 1.5 TH/s miner
+ * (11.5 s/share), which is why the small miner alongside it ran at 0.02%.
+ *
+ * The high side is deliberately lenient: an operator on a flaky link may ask for
+ * a deliberately high difficulty, and the only cost is coarser sampling. */
+#define SUGGEST_MIN_INTERVAL_S  2.0         /* below this s/share: implausible */
+#define SUGGEST_MAX_INTERVAL_S  120.0       /* above this: lenient, leave alone */
+
 /* Asynchronous secondary-pool bring-up. The PRIMARY pool is handshaked
  * synchronously and the miner mines it at once; the SECONDARY is brought up by a
  * non-blocking state machine driven from the main poll loop, so a pool that
@@ -105,6 +123,14 @@ typedef struct {
     char    job_id[64];
     int     pool;      /* 0 = A, 1 = B */
     int64_t seen_us;
+    /* FIX-12: the difficulty the MINER was mining at when this job was PRESENTED
+     * to it. A share for this job is worth exactly this much work, whatever the
+     * pool's difficulty has since become. Weighting a submit by the pool's
+     * CURRENT difficulty instead over-credits every share that a vardiff ramp
+     * overtakes (a share mined at 8192 counted at 131072 is 16x of imaginary
+     * work), and mux_hashrate() is then highest exactly during the churn the
+     * suggest-clamp has to judge against. 0 = unknown (pre-FIX-12 fallback). */
+    double  diff;
 } jobref_t;
 
 typedef struct {
@@ -182,11 +208,15 @@ typedef struct {
     bool        miner_vroll;         /* miner sent mining.configure (version-rolling) */
     uint32_t    miner_vmask_req;     /* mask the miner requested */
     char        miner_cfg[SPLITMUX_LINE]; /* raw miner configure line (replayed to sec) */
-    /* Raw mining.suggest_difficulty from the miner, replayed to the secondary when
-     * it comes up so BOTH pools size this miner the same way (a secondary that
-     * misses it sits at its default difficulty and wrecks the first swap). */
+    /* The miner's mining.suggest_difficulty AS SENT TO THE POOLS — verbatim when
+     * it was plausible, rewritten in place with the mux's own target when it was
+     * not (see clamp_miner_hint). Replayed to the secondary when it comes up so
+     * BOTH pools size this miner the same way (a secondary that misses it sits at
+     * its default difficulty and wrecks the first swap), and so a late secondary
+     * is never re-armed with the bogus value the clamp already corrected. */
     char        miner_sugg[512];
     size_t      miner_sugg_len;
+    double      sugg_clamp_last;  /* last clamped value logged (dedupes repeats) */
     uint64_t    routed_shares;   /* submits routed so far — the estimate's sample count */
     bool        vmask_active;        /* version-rolling was granted to the miner */
     uint32_t    vmask;               /* mask currently advertised to the miner */
@@ -322,6 +352,21 @@ static int smx_no_suggest(void)
     static int cached = -1;
     if (cached < 0) {
         const char *v = getenv("SPLITMUX_NO_SUGGEST");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Test-only negative control (SPLITMUX_NO_CLAMP=1, one cached getenv): relay the
+ * miner's mining.suggest_difficulty verbatim however implausible it is, i.e. the
+ * pre-fix behaviour. Lets one binary show RED (a pool's vardiff ramping away from
+ * a bogus hint, stranding in-flight shares as "Above target") vs GREEN (the hint
+ * corrected to the measured rate before it leaves the mux). Unset in production. */
+static int smx_no_clamp(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("SPLITMUX_NO_CLAMP");
         cached = (v && v[0] && v[0] != '0') ? 1 : 0;
     }
     return cached;
@@ -546,13 +591,17 @@ static int forward_with_id(int fd, const char *line, int64_t new_id)
 
 /* ---- routing ring -------------------------------------------------------- */
 
-static void ring_add(ring_t *r, const char *job_id, int pool, int64_t t)
+/* `diff` is the difficulty in force at the miner when this job is presented to
+ * it — see jobref_t.diff. Pass 0.0 only when it is genuinely unknown. */
+static void ring_add(ring_t *r, const char *job_id, int pool, int64_t t,
+                     double diff)
 {
     if (!job_id[0])
         return;
     snprintf(r->e[r->head].job_id, sizeof r->e[r->head].job_id, "%s", job_id);
     r->e[r->head].pool = pool;
     r->e[r->head].seen_us = t;
+    r->e[r->head].diff = diff;
     r->head = (r->head + 1) % SPLITMUX_RING;
     if (r->count < SPLITMUX_RING)
         r->count++;
@@ -567,6 +616,19 @@ static int ring_find(const ring_t *r, const char *job_id)
             return i;
     }
     return -1;
+}
+
+/* FIX-12: difficulty the miner is mining at right now, i.e. the value to stamp
+ * on a job as it is presented. m->miner_diff is authoritative — it is literally
+ * the last mining.set_difficulty the miner was sent, and every presentation path
+ * (active-pool notify, swap) has already reconciled it via emit_miner_diff. Fall
+ * back to the owning pool's own value while the miner has not been told anything
+ * yet (first job of a session). */
+static double shown_diff(const mux_t *m, int pool)
+{
+    if (m->miner_diff > 0.0)
+        return m->miner_diff;
+    return m->pool[pool].diff > 0.0 ? m->pool[pool].diff : 0.0;
 }
 
 /* ============================ single-pool path =========================== */
@@ -1160,6 +1222,104 @@ static double suggest_target_diff(double hr)
     return p;
 }
 
+/* ---- clamping an implausible hint FROM THE MINER ------------------------- */
+
+/* params[0] of a mining.suggest_difficulty line, or 0.0 if it isn't one / has no
+ * usable numeric parameter. */
+static double sugg_line_diff(const char *line)
+{
+    json_error_t e;
+    json_t *r = json_loads(line, 0, &e);
+    if (!r)
+        return 0.0;
+    double d = 0.0;
+    const char *meth = json_string_value(json_object_get(r, "method"));
+    if (meth && !strcmp(meth, "mining.suggest_difficulty")) {
+        json_t *v = json_array_get(json_object_get(r, "params"), 0);
+        if (json_is_number(v))
+            d = json_number_value(v);
+    }
+    json_decref(r);
+    return d > 0.0 ? d : 0.0;
+}
+
+/* Rewrite a mining.suggest_difficulty line IN PLACE with `diff`, preserving the
+ * id and method so the pool answers the miner's own request id and the reply
+ * still relays back to it. Writes a newline-free compact line into buf; returns
+ * its length, or -1 if the line could not be rewritten (caller then relays the
+ * original untouched, which is the safe direction). */
+static int sugg_rewrite(char *buf, size_t n, const char *line, double diff)
+{
+    json_error_t e;
+    json_t *r = json_loads(line, 0, &e);
+    if (!r)
+        return -1;
+    json_t *p = json_object_get(r, "params");
+    if (!json_is_array(p) || json_array_size(p) < 1) {
+        json_decref(r);
+        return -1;
+    }
+    /* Pools snap to integers and some reject a float here, so emit an integer
+     * whenever the value is one (suggest_target_diff always returns a power of
+     * two, so in practice it always is). */
+    json_t *v;
+    if (diff > 0.0 && diff < 9.0e15 && diff == (double)(json_int_t)diff)
+        v = json_integer((json_int_t)diff);
+    else
+        v = json_real(diff);
+    /* json_array_set_new consumes `v` on failure as well as on success. */
+    if (!v || json_array_set_new(p, 0, v) != 0) {
+        json_decref(r);
+        return -1;
+    }
+    char *dump = json_dumps(r, JSON_COMPACT);
+    json_decref(r);
+    if (!dump)
+        return -1;
+    int len = snprintf(buf, n, "%s", dump);
+    free(dump);
+    if (len < 0 || (size_t)len >= n)
+        return -1;
+    return len;
+}
+
+/* What the pools should actually be told, given the difficulty this miner asked
+ * for. Returns `asked` unchanged whenever the hint is to be left alone.
+ *
+ * A miner's hint is a statement about the miner, and the miner is usually right —
+ * so this is a plausibility check, not a control loop. It fires only when the
+ * asked difficulty implies a share rate the mux can SEE is impossible for this
+ * miner (< SUGGEST_MIN_INTERVAL_S per share), and only once there are enough
+ * samples for the measurement to mean anything:
+ *
+ *   - no estimate yet (rate 0, or fewer than SUGGEST_MIN_SAMPLES routed shares)
+ *     -> leave it alone. We cannot judge it, and a one-share estimate is Poisson
+ *        noise; acting on it would be guessing with the miner's money.
+ *   - implied interval > SUGGEST_MAX_INTERVAL_S -> leave it alone (lenient).
+ *   - implied interval < SUGGEST_MIN_INTERVAL_S -> clamp UP to the mux's own
+ *     target, the same ~SUGGEST_TARGET_S/share figure mux_suggest_check uses.
+ *   - anything in between -> leave it alone.
+ */
+static double clamp_miner_hint(const mux_t *m, double asked, int64_t t)
+{
+    if (smx_no_clamp() || asked <= 0.0)
+        return asked;
+    if (m->routed_shares < SUGGEST_MIN_SAMPLES)
+        return asked;                      /* not enough evidence to contradict */
+    double hr = mux_hashrate(m, t);
+    if (hr <= 0.0)
+        return asked;                      /* no estimate: the miner knows better */
+    double implied_s = asked * 4294967296.0 / hr;
+    if (implied_s > SUGGEST_MAX_INTERVAL_S)
+        return asked;                      /* high side: lenient by design */
+    if (implied_s >= SUGGEST_MIN_INTERVAL_S)
+        return asked;                      /* plausible */
+    double want = suggest_target_diff(hr);
+    if (want <= 0.0 || want <= asked)
+        return asked;                      /* nothing better to offer */
+    return want;
+}
+
 /* Send the mux's OWN mining.suggest_difficulty to pool p under SENTINEL_SUGGEST
  * (handle_upstream_line drops that ack, so it never reaches the miner or the
  * share-accounting ring). Records the send for rate limiting. Returns 0, or -1 if
@@ -1506,7 +1666,9 @@ static int do_swap(mux_t *m, const char *notify_line, size_t nlen, int64_t t)
      * won't force-clean re-present the same job (which would cause duplicates). */
     stratum_msg_t nm;
     if (stratum_msg_parse(notify_line, &nm) == 0 && nm.type == SM_NOTIFY) {
-        ring_add(&m->ring, nm.job_id, tgt, t);
+        /* emit_miner_diff(tgt) above has already moved the miner onto the target
+         * pool's difficulty, so shown_diff() is that value. */
+        ring_add(&m->ring, nm.job_id, tgt, t, shown_diff(m, tgt));
         snprintf(m->pool[tgt].last_shown_job,
                  sizeof m->pool[tgt].last_shown_job, "%s", nm.job_id);
     }
@@ -1611,7 +1773,7 @@ static int handle_upstream_line(mux_t *m, int p, const char *line, size_t len)
             /* FIX-3: record ONLY jobs actually shown to the miner, tagged with
              * the owning pool, so overlapping id namespaces cannot cross-route.
              * FIX-11: also track it as this pool's last-shown job. */
-            ring_add(&m->ring, msg.job_id, p, t);
+            ring_add(&m->ring, msg.job_id, p, t, shown_diff(m, p));
             snprintf(m->pool[p].last_shown_job,
                      sizeof m->pool[p].last_shown_job, "%s", msg.job_id);
             return write_all(m->down_fd, line, len);
@@ -1713,12 +1875,19 @@ static int handle_submit(mux_t *m, int64_t id, const char *job_id,
     smx_dbg_line("TX", pool, line, len);
     if (write_all(m->pool[pool].fd, line, len) < 0)
         return -1;
-    /* Weight by the ROUTED pool's difficulty — that is what this pool credits the
-     * share at, so it is what the dashboard and the slice sizer should see. (Using
-     * the miner's currently-advertised difficulty instead mis-weights a share that
-     * the grace window routes back to the pool we just left, since it was mined at
-     * that pool's difficulty, not the new one's.) */
-    double w = m->pool[pool].diff > 0.0 ? m->pool[pool].diff : m->miner_diff;
+    /* FIX-12: weight by the difficulty the miner was ACTUALLY mining at when this
+     * job was shown to it — recorded on the ring entry at presentation time — not
+     * by the pool's difficulty NOW. A share represents the work its own job asked
+     * for; a vardiff step that lands between presentation and submit changes what
+     * the pool will pay for it, but not how much hashing it took to find. Weighting
+     * by the current value over-credits every share a ramp overtakes (8192 mined,
+     * 131072 credited = 16x of hashrate that does not exist), and it does so
+     * precisely while the ramp is running — which is when the suggest-clamp has to
+     * trust mux_hashrate(). Unknown job (grace/fallback route): keep the old
+     * behaviour, the routed pool's current difficulty. */
+    double w = (idx >= 0 && m->ring.e[idx].diff > 0.0)
+                   ? m->ring.e[idx].diff
+                   : (m->pool[pool].diff > 0.0 ? m->pool[pool].diff : m->miner_diff);
     m->total_work += w * 4294967296.0;
     m->routed_shares++;
     /* Pending until this pool acks it (the ack is what tells us accept/reject). */
@@ -1781,25 +1950,64 @@ static int process_lines(mux_t *m, linebuf_t *lb, bool from_up, int p)
                      * connected pool; the reply the miner sees is the active
                      * pool's, which is the one it is mining. */
                     bool broadcast = (strstr(tmp, "\"mining.suggest_difficulty\"") != NULL);
-                    if (broadcast && linelen < sizeof m->miner_sugg) {
-                        memcpy(m->miner_sugg, tmp, linelen);
-                        m->miner_sugg[linelen] = '\0';
-                        m->miner_sugg_len = linelen;   /* replayed to a late secondary */
+                    /* What actually goes out. Normally the miner's own line; for
+                     * an implausible suggest_difficulty, the same line rewritten
+                     * in place with the mux's own target (see clamp_miner_hint).
+                     * Exactly ONE line is sent — sending both the miner's and the
+                     * mux's would be a duel the miner wins, because a pool takes
+                     * the last writer and the miner repeats its hint. */
+                    const char *outl = tmp;
+                    size_t      outn = linelen;
+                    char        cbuf[sizeof m->miner_sugg];
+                    if (broadcast) {
+                        int64_t tn = now_us();
+                        double asked = sugg_line_diff(tmp);
+                        double use = clamp_miner_hint(m, asked, tn);
+                        if (use > 0.0 && use != asked) {
+                            int cn = sugg_rewrite(cbuf, sizeof cbuf - 1, tmp, use);
+                            if (cn > 0) {
+                                cbuf[cn] = '\n';
+                                outl = cbuf;
+                                outn = (size_t)cn + 1;
+                                /* Log the correction once per changed value: the
+                                 * miner repeats its hint (14x live) and every
+                                 * repeat is clamped, but only the first is news. */
+                                if (m->sugg_clamp_last != use) {
+                                    double hr = mux_hashrate(m, tn);
+                                    m->sugg_clamp_last = use;
+                                    smx_dbg("suggest: miner asked difficulty %.0f, "
+                                            "which is one share every %.2f s at the "
+                                            "measured %.3f TH/s — implausible; "
+                                            "sending %.0f instead\n",
+                                            asked,
+                                            hr > 0.0 ? asked * 4294967296.0 / hr : 0.0,
+                                            hr / 1e12, use);
+                                }
+                            }
+                        }
+                    }
+                    /* Store what the pools were actually told, so the replay to a
+                     * late secondary (sec_send_handshake) carries the corrected
+                     * value too rather than re-arming it with the bogus one. */
+                    if (broadcast && outn < sizeof m->miner_sugg) {
+                        memcpy(m->miner_sugg, outl, outn);
+                        m->miner_sugg[outn] = '\0';
+                        m->miner_sugg_len = outn;      /* replayed to a late secondary */
                     }
                     if (broadcast) {
                         smx_dbg("miner chatter -> BOTH pools (session-scoped hint)\n");
                         for (int q = 0; q < 2; q++) {
                             if (q == m->active || m->pool[q].fd < 0)
                                 continue;
-                            smx_dbg_line("TX", q, tmp, linelen);
-                            (void)write_all(m->pool[q].fd, tmp, linelen);
+                            smx_dbg_line("TX", q, outl, outn);
+                            (void)write_all(m->pool[q].fd, outl, outn);
                         }
                     } else {
                         smx_dbg("miner chatter -> active pool %c\n",
                                 m->active == 0 ? 'A' : 'B');
                     }
-                    smx_dbg_line("TX", m->active, tmp, linelen);
-                    if (write_all(m->pool[m->active].fd, tmp, linelen) < 0) { rc = -1; break; }
+                    smx_dbg_line("TX", m->active, outl, outn);
+                    if (write_all(m->pool[m->active].fd, outl, outn) < 0) { rc = -1; break; }
                 }
             }
         } else {
