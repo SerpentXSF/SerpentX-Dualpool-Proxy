@@ -15,6 +15,25 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ---
 
+## Unreleased
+
+- **`hashrate_split`: a miner's own difficulty hint is now sanity-checked.** Some
+  firmware sends a hardcoded `mining.suggest_difficulty` regardless of how fast the
+  machine actually is — a 12.8 TH/s miner asking for 4000, which is a share every
+  1.3 seconds. Forwarding that to both pools made a pool re-size repeatedly, and
+  every step stranded the shares already in flight, which is most of a 34% reject
+  rate against one pool. The request is now compared against the measured hashrate
+  and raised when it implies less than two seconds per share; a conservative or
+  plausible request is passed through untouched. Shares are also weighted by the
+  difficulty their job was shown at rather than the pool's current one, so the
+  measured rate stays honest while a pool is re-sizing.
+- Documented what a proxy-based split can and cannot do: the difficulty pin only
+  holds on pools that honour `mining.suggest_difficulty` (solo.ckpool does, Kryptex
+  does not), `startdiff`/`mindiff` are per-pool so a mixed-size fleet cannot be
+  pinned correctly for every miner, and miner firmware that keeps two connections
+  open and interleaves at the ASIC avoids the underlying problem entirely — prefer
+  it where the hardware supports it.
+
 ## X.4 — Hashrate split (experimental)
 
 - **New mode — `hashrate_split` (EXPERIMENTAL):** one miner mines **both pools at

@@ -152,9 +152,30 @@ Measured on the same miner, same pools, back to back:
 | No `mindiff` | oscillating (`1205 → 226 → 653` …) | **2.2%**, climbing |
 | `mindiff` pinned | fixed, unchanged over 64 pool swaps | **0.02%** |
 
+**How the pin reaches the pool:** it is not a password trick. `mindiff` makes the
+underlying `ckproxy` send a real `mining.suggest_difficulty` to the pool after it
+authenticates, and pools that implement that method adopt the value. Setting a
+`d=`/`diff=` string in the pool password does **nothing** on ckpool-based pools —
+they store the password and never read it — despite what several guides claim.
+
+**Whether the pin holds depends on the pool.** `mining.suggest_difficulty` is
+advisory: a pool is free to ignore it and run its own vardiff anyway.
+
+| Pool | Honours the pin? | Observed |
+|---|---|---|
+| solo.ckpool | **Yes** | parks at the pinned value and stays there |
+| Kryptex | **No** | keeps its own vardiff (seen wandering 8192 → 1,000,000) |
+
+Against a pool that ignores it, expect residual rejects — worse for a large miner,
+which ramps through more difficulty steps. That part is not fixable from the proxy
+(see [Limits of a proxy-based split](#limits-of-a-proxy-based-split) below).
+
 Size it for roughly one share every 10–15 seconds — the same values as the
 [`startdiff` table below](#suggested-startdiff-by-miner-hashrate), applied to
-**both** pools, with `mindiff` equal to `startdiff` so nothing can drift under it:
+**both** pools, with `mindiff` equal to `startdiff` so nothing can drift under it.
+**Size it to the miner**: a floor meant for a 13 TH/s machine is ~20× too high for
+a 1.5 TH/s one, and `startdiff`/`mindiff` are per-pool, so a **mixed-size fleet on
+this mode cannot be pinned correctly for every miner at once**.
 
 ```json
 "pools": [
@@ -172,6 +193,29 @@ so pick at least that.
 This also protects a **large** miner from a pool that opens a session at a very
 high difficulty: without a floor it may find its first share too slowly for the
 pool's vardiff to recover, and some firmware watchdogs reconnect before it does.
+
+### Limits of a proxy-based split
+
+Worth knowing before you rely on this mode, because it explains what the tuning
+above can and cannot achieve.
+
+A proxy swaps pools at the **Stratum** layer, so a swap costs a `set_extranonce`
+and a work flush — which puts a floor on how often it can happen, measured in
+minutes. That means each pool inevitably sees the miner go quiet while the other
+pool has it, and a pool that runs its own vardiff will react to that.
+
+Miner **firmware** can do better, because it works below Stratum. The dual-pool
+firmware in [ESP-Miner-NerdQAxePlus](https://github.com/shufps/ESP-Miner-NerdQAxePlus)
+holds **two connections open at once** and interleaves jobs at the ASIC every
+~500 ms, so neither pool ever sees an idle miner and neither has a reason to
+re-size. It also clamps the chip to the lower of the two pools' difficulties and
+filters shares locally — something a proxy cannot do, because it never hashes and
+so cannot know a share's difficulty before submitting it.
+
+**If your hardware runs that firmware, prefer it for splitting a single miner.**
+It removes the cause rather than compensating for it. This mode exists for the
+miners that can't — closed firmware with a single pool field, which is most SHA-256
+hardware.
 
 **Knobs:**
 
@@ -227,6 +271,20 @@ them via the dashboard or `config.json` takes effect on the next restart (only
   difficulty on the miner's behalf once it can measure the rate, which clears the
   problem for most sessions, but it is reactive: it needs one share first. A small
   miner (~1–2 TH/s) is unaffected.
+- **A pool that ignores the difficulty pin will still move:** `mining.suggest_difficulty`
+  is advisory. Against a pool that runs its own vardiff regardless (Kryptex), the
+  difficulty keeps changing and each change strands the shares in flight. Expect
+  low single-digit reject rates there rather than the ~0.02% seen against a pool
+  that honours the pin, and worse for a large miner, which ramps through more
+  steps. The proxy no longer makes this worse by forwarding a miner's own
+  implausible difficulty hint (see below), but it cannot stop a pool re-sizing.
+- **A miner's own difficulty hint is sanity-checked, not obeyed blindly:** some
+  firmware sends a hardcoded `mining.suggest_difficulty` — one 12.8 TH/s miner asks
+  for 4000, which would be a share every 1.3 seconds. Forwarding that to a pool
+  makes it re-size repeatedly and cost far more in rejects than the hint saves. The
+  proxy compares the request against the miner's measured hashrate and raises it if
+  it implies less than two seconds per share; a merely conservative request, or one
+  that is plausible for that miner, is passed through untouched.
 - **Split accounting is per connection:** a split miner's row shows its combined
   accepted/rejected across both pools, while the `pool` column shows the pool it
   started on. Per-pool totals and `/metrics` attribute each share to the pool that
