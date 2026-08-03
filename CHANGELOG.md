@@ -15,9 +15,9 @@ The version is the single source of truth in [`VERSION`](VERSION) /
 
 ---
 
-## Unreleased
+## X.4 — Hashrate split (experimental)
 
-- **`hashrate_split`: a miner's own difficulty hint is now sanity-checked.** Some
+- **`hashrate_split`: a miner's own difficulty hint is sanity-checked.** Some
   firmware sends a hardcoded `mining.suggest_difficulty` regardless of how fast the
   machine actually is — a 12.8 TH/s miner asking for 4000, which is a share every
   1.3 seconds. Forwarding that to both pools made a pool re-size repeatedly, and
@@ -33,8 +33,6 @@ The version is the single source of truth in [`VERSION`](VERSION) /
   pinned correctly for every miner, and miner firmware that keeps two connections
   open and interleaves at the ASIC avoids the underlying problem entirely — prefer
   it where the hardware supports it.
-
-## X.4 — Hashrate split (experimental)
 
 - **New mode — `hashrate_split` (EXPERIMENTAL):** one miner mines **both pools at
   once**, the way some dual-pool BitAxe/NerdQAxe firmware works, but without
